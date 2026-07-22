@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.financial_agent/
+.pytest_cache/
+.ruff_cache/
+.agents/
+.codex/
+__pycache__/
+*.py[cod]
+exports/
+.web-*.png
+.DS_Store
+Thumbs.db

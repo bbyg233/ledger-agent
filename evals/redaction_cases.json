@@ -1,0 +1,7 @@
+[
+  {"name": "api_key", "input": "api_key=sk-live-abcdefghijklmnop", "forbidden": ["sk-live-abcdefghijklmnop"]},
+  {"name": "bearer", "input": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz", "forbidden": ["abcdefghijklmnopqrstuvwxyz"]},
+  {"name": "bank_card", "input": "卡号 6222 0212 3456 7890", "forbidden": ["6222 0212 3456 7890"]},
+  {"name": "phone", "input": "联系电话 13812345678", "forbidden": ["13812345678"]},
+  {"name": "identity", "input": "身份证 110105199001011234", "forbidden": ["110105199001011234"]}
+]

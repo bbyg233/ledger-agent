@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+          environment-name: financial-agent
+          cache-environment: true
+      - name: Lint Python
+        shell: bash -l {0}
+        run: micromamba run -n financial-agent ruff check src tests
+      - name: Test
+        shell: bash -l {0}
+        run: micromamba run -n financial-agent bash -lc 'PYTHONPATH=src pytest -q'
+      - name: Check browser script syntax
+        run: node --check web/app.js

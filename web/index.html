@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ledger Agent</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">Ledger Agent<span>本地个人账本</span></div>
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-button active" data-view="chat" type="button"><b>⌁</b><span>对话记账</span></button>
+        <button class="nav-button" data-view="bills" type="button"><b>¥</b><span>资金明细</span></button>
+        <button class="nav-button" data-view="accounts" type="button"><b>◎</b><span>账户与对账</span></button>
+        <button class="nav-button" data-view="budgets" type="button"><b>▥</b><span>预算规划</span></button>
+        <button class="nav-button" data-view="subscriptions" type="button"><b>↻</b><span>订阅</span></button>
+        <button class="nav-button" data-view="liabilities" type="button"><b>!</b><span>待还</span></button>
+        <button class="nav-button" data-view="logs" type="button"><b>≡</b><span>日志</span></button>
+        <button class="nav-button" data-view="settings" type="button"><b>⚙</b><span>账本设置</span></button>
+      </nav>
+      <button id="model-settings" class="runtime-status" type="button" title="切换模型">
+        <span id="health-dot" class="status-dot"></span>
+        <div><strong id="model-name">正在连接</strong><small><span id="provider-name">LLM</span> · 本地 SQLite</small></div>
+      </button>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div><h1 id="view-title">财务助理</h1><p id="view-subtitle">自然语言记账与查询</p></div>
+        <div class="topbar-actions">
+          <button id="clear-chat" class="icon-button chat-clear" type="button" title="清空聊天记录" aria-label="清空聊天记录">×</button>
+          <button id="model-settings-mobile" class="icon-button mobile-model-settings" type="button" title="切换模型" aria-label="切换模型">⚙</button>
+          <input id="month" class="month-input" type="month" aria-label="查看月份">
+        </div>
+      </header>
+
+      <section id="view-chat" class="view chat-view active">
+        <div id="messages" class="messages" aria-live="polite">
+          <div id="empty-chat" class="empty-state"><strong>今天记点什么？</strong><span>输入一笔消费，或问我本月的钱花在了哪里。</span></div>
+        </div>
+        <form id="composer" class="composer">
+          <div id="composer-drop-hint" class="composer-drop-hint" aria-hidden="true" hidden>松开以添加图片</div>
+          <div id="image-previews" class="image-previews" aria-label="待发送图片" aria-live="polite" hidden></div>
+          <div class="composer-row">
+            <input id="prompt" autocomplete="off" maxlength="1000" placeholder="例如：昨天午饭 38 元 微信" aria-label="消息">
+            <div class="composer-actions">
+              <label id="attach-images" class="icon-button attachment-button" for="receipt-images" title="添加账单截图" aria-label="添加账单截图">
+                <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="m21 15-4.3-4.3a1 1 0 0 0-1.4 0L6 20"></path><path d="M14 6v6"></path><path d="M11 9h6"></path></svg>
+              </label>
+              <input id="receipt-images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+              <button id="record-audio" class="icon-button record-audio" type="button" title="开始语音输入" aria-label="开始语音输入">
+                <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0"></path><path d="M12 17v4"></path><path d="M8 21h8"></path></svg>
+              </button>
+              <button id="cancel-request" class="icon-button cancel" type="button" title="取消等待" aria-label="取消等待" hidden>×</button>
+              <button id="send" class="icon-button primary" type="submit" title="发送" aria-label="发送">↑</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section id="view-subscriptions" class="view data-view">
+        <form id="subscription-form" class="management-form">
+          <label>订阅名称<input id="subscription-name" required maxlength="80" placeholder="例如：网易云音乐"></label>
+          <label>扣款金额<input id="subscription-amount" required min="0.01" step="0.01" type="number" placeholder="18"></label>
+          <label>扣款周期<select id="subscription-cycle"><option value="1">每月</option><option value="3">每季</option><option value="6">每半年</option><option value="12">每年</option></select></label>
+          <label>下次扣款<input id="subscription-next-date" required type="date"></label>
+          <label>分类<input id="subscription-category" list="category-values" value="其他"></label>
+          <label>支付方式<input id="subscription-account" list="payment-methods" placeholder="未指定"></label>
+          <label class="wide">备注（可选）<input id="subscription-note" maxlength="300" placeholder="例如：家庭会员"></label>
+          <button class="button primary" type="submit">新增订阅</button>
+        </form>
+        <div id="subscription-summary" class="management-summary"></div>
+        <div id="subscription-list" class="management-list"></div>
+        <div id="subscriptions-empty" class="table-empty" hidden>还没有订阅项目</div>
+      </section>
+
+      <section id="view-liabilities" class="view data-view">
+        <form id="liability-form" class="management-form liability-form">
+          <label>待还账户<select id="liability-existing"><option value="">新建账户</option></select></label>
+          <label>项目名称<input id="liability-name" required maxlength="80" placeholder="例如：花呗"></label>
+          <label>平台 / 发卡行<input id="liability-provider" maxlength="80" placeholder="例如：支付宝"></label>
+          <label>类型<select id="liability-kind"><option value="consumer_credit">消费信贷</option><option value="credit_card">信用卡</option><option value="installment">分期</option><option value="other">其他</option></select></label>
+          <label>本月应还<input id="liability-due-amount" required min="0" step="0.01" type="number" value="0"></label>
+          <label>还款日（可选）<input id="liability-due-date" type="date"></label>
+          <label>最低还款<input id="liability-minimum" min="0" step="0.01" type="number" value="0"></label>
+          <label>还款方式<input id="liability-account" list="payment-methods" placeholder="未指定"></label>
+          <label>额度（可选）<input id="liability-limit" min="0" step="0.01" type="number" placeholder="信用卡额度"></label>
+          <label class="wide">备注（可选）<input id="liability-note" maxlength="300" placeholder="例如：7 月账单"></label>
+          <button id="liability-submit" class="button primary" type="submit">新增账户并保存本月账单</button>
+        </form>
+        <p class="management-note">还款只更新待还金额，不会自动新增支出账单，避免信用卡消费与还款重复统计。</p>
+        <div id="liability-summary" class="management-summary"></div>
+        <div id="liability-list" class="management-list"></div>
+        <div id="liabilities-empty" class="table-empty" hidden>当前月份没有待还账单</div>
+      </section>
+
+      <section id="view-bills" class="view data-view">
+        <div class="toolbar">
+          <div class="search-field"><span>⌕</span><input id="bill-search" placeholder="搜索商户、用途、还款对象或账单月份"></div>
+          <select id="bill-direction" aria-label="资金类型"><option value="">全部记录</option><option value="expense">支出</option><option value="income">收入</option><option value="repayment">还款</option><option value="transfer">转账</option><option value="liability">待还变动</option></select>
+          <button id="undo" class="button" type="button">撤销上次账单操作</button>
+        </div>
+        <div class="table-wrap">
+          <table class="financial-table">
+            <thead><tr><th>日期</th><th>对象 / 用途</th><th>类型 / 分类</th><th>资金账户</th><th>金额</th><th aria-label="操作"></th></tr></thead>
+            <tbody id="bill-rows"></tbody>
+          </table>
+          <div id="bills-empty" class="table-empty" hidden>当前月份没有匹配资金记录</div>
+        </div>
+      </section>
+
+      <section id="view-accounts" class="view data-view accounts-view">
+        <div id="account-summary" class="management-summary"></div>
+        <div id="account-list" class="account-list"></div>
+        <div class="accounts-forms">
+          <form id="transfer-form" class="management-form">
+            <h2>账户转账</h2>
+            <label>转出账户<select id="transfer-source" required></select></label>
+            <label>转入账户<select id="transfer-target" required></select></label>
+            <label>金额<input id="transfer-amount" required min="0.01" step="0.01" type="number"></label>
+            <label>日期<input id="transfer-date" required type="date"></label>
+            <label class="wide">备注（可选）<input id="transfer-note" maxlength="300" placeholder="例如：日常充值"></label>
+            <button class="button primary" type="submit">确认转账</button>
+          </form>
+          <form id="reconcile-form" class="management-form">
+            <h2>账户对账</h2>
+            <label>账户<select id="reconcile-account" required></select></label>
+            <label>实际余额<input id="reconcile-balance" required step="0.01" type="number"></label>
+            <label>截至日期<input id="reconcile-date" required type="date"></label>
+            <label class="wide">备注（可选）<input id="reconcile-note" maxlength="300" placeholder="例如：查看微信钱包后的余额"></label>
+            <button class="button primary" type="submit">保存对账</button>
+          </form>
+          <form id="account-form" class="management-form">
+            <h2>新增资金账户</h2>
+            <label>账户名称<input id="account-name" required maxlength="40" placeholder="例如：招商银行卡"></label>
+            <label>类型<select id="account-kind"><option value="wallet">电子钱包</option><option value="bank">银行卡</option><option value="cash">现金</option><option value="other">其他</option></select></label>
+            <label>当前余额<input id="account-balance" required step="0.01" type="number" value="0"></label>
+            <label>截至日期<input id="account-date" required type="date"></label>
+            <button class="button primary" type="submit">新增账户</button>
+          </form>
+        </div>
+      </section>
+
+      <section id="view-budgets" class="view data-view">
+        <form id="budget-form" class="budget-form">
+          <label>分类<input id="budget-category" list="category-values" required maxlength="40" placeholder="例如：餐饮"></label>
+          <label>月预算<input id="budget-amount" required min="0" step="0.01" type="number" placeholder="3000"></label>
+          <button class="button primary" type="submit">保存预算</button>
+        </form>
+        <div id="budget-list" class="budget-list"></div>
+        <div id="budgets-empty" class="table-empty" hidden>还没有设置分类预算</div>
+      </section>
+
+      <section id="view-logs" class="view data-view">
+        <div class="toolbar log-toolbar">
+          <div class="segmented" aria-label="日志类型">
+            <button class="segment active" data-log-kind="operations" type="button">操作记录</button>
+            <button class="segment" data-log-kind="agent" type="button">Agent 调用</button>
+          </div>
+          <select id="log-filter" aria-label="筛选日志"></select>
+          <button id="refresh-logs" class="icon-button" type="button" title="刷新日志" aria-label="刷新日志">↻</button>
+        </div>
+        <div class="table-wrap">
+          <table class="logs-table">
+            <thead id="log-head"></thead>
+            <tbody id="log-rows"></tbody>
+          </table>
+          <div id="logs-empty" class="table-empty" hidden>暂无日志</div>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view data-view settings-view">
+        <div class="settings-section classification-section">
+          <div class="settings-heading"><div><h2>智能分类</h2><p id="classification-status">正在检查待分类账单</p></div><button id="classify-pending" class="button primary" type="button">自动分类</button></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-heading"><div><h2>分类</h2><p>统一报表与预算口径，别名会在写入时自动归一。</p></div><button class="button primary" data-add-reference="category" type="button">新增分类</button></div>
+          <div id="category-list" class="reference-list"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-heading"><div><h2>支付方式</h2><p>统一微信、支付宝、现金、银行卡等名称。</p></div><button class="button primary" data-add-reference="payment_method" type="button">新增支付方式</button></div>
+          <div id="payment-method-list" class="reference-list"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-heading"><div><h2>数据备份</h2><p>备份包含整个 SQLite 账本。恢复会覆盖当前数据，操作前请先创建新备份。</p></div><button id="create-backup" class="button primary" type="button">创建备份</button></div>
+          <div id="backup-list" class="backup-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="insights-resizer" class="insights-resizer" role="separator" aria-label="调整右侧栏宽度" aria-orientation="vertical" tabindex="0" title="拖动调整右侧栏宽度"></div>
+    <aside class="insights">
+      <section id="draft" class="draft-panel" hidden>
+        <div class="section-heading"><h2 id="draft-title">待确认账单</h2><span id="draft-count">0 笔</span></div>
+        <div id="draft-list" class="draft-list"></div>
+        <div id="management-draft-list" class="draft-list" hidden></div>
+        <div class="panel-actions"><button id="cancel-draft" class="button" type="button">取消全部</button><button id="confirm-draft" class="button primary" type="button">确认写入</button></div>
+      </section>
+
+      <section>
+        <div class="section-heading"><h2>月度概览</h2><span id="month-count">0 笔</span></div>
+        <div class="metrics">
+          <div class="metric capital"><span class="metric-label">当前本金<button id="edit-capital" class="metric-edit" type="button" title="查看账户与对账" aria-label="查看账户与对账">↗</button></span><strong id="capital-balance">未设置</strong></div>
+          <div class="metric debt"><span title="所有月份未还账单合计">当前负债</span><strong id="current-debt">¥0.00</strong></div>
+          <div class="metric"><span>本月收入</span><strong id="income">¥0.00</strong></div>
+          <div class="metric expense"><span>本月消费</span><strong id="expense">¥0.00</strong></div>
+          <div class="metric repayment"><span title="归属于当前账单月份的已还金额">本月已还</span><strong id="liability-paid">¥0.00</strong></div>
+          <div class="metric"><span title="当前账单月份仍待偿还的金额">本月待还</span><strong id="liability-remaining">¥0.00</strong></div>
+          <div class="metric cash wide">
+            <span class="metric-label metric-help-label">
+              本月现金变化
+              <button
+                class="metric-help"
+                type="button"
+                title="本月现金变化 = 本月收入 - 直接支付支出 - 本月实际还款；信贷消费会增加待还，但消费当日不改变现金。"
+                aria-label="计算说明：本月现金变化等于本月收入减去直接支付支出，再减去本月实际还款；信贷消费会增加待还，但消费当日不改变现金。"
+              >?</button>
+            </span>
+            <strong id="cash-change">¥0.00</strong>
+          </div>
+        </div>
+      </section>
+
+      <section><div class="section-heading"><h2>支出分布</h2></div><div id="bars" class="bars"></div></section>
+      <section><div class="section-heading"><h2>最近资金与待还记录</h2></div><div id="recent-transactions" class="recent-list"></div></section>
+    </aside>
+  </div>
+
+  <dialog id="edit-dialog">
+    <form id="edit-form" class="dialog-body">
+      <div class="dialog-heading"><h2>编辑账单</h2><button id="close-edit" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="form-grid">
+        <label>日期<input id="edit-date" type="date" required></label>
+        <label>金额<input id="edit-amount" type="number" min="0" step="0.01" required></label>
+        <label>类型<select id="edit-direction"><option value="expense">支出</option><option value="income">收入</option></select></label>
+        <label>分类<input id="edit-category" list="category-values" placeholder="其他" required></label>
+        <label>支付方式<input id="edit-account" list="payment-methods" placeholder="未指定"></label>
+        <label>商户 / 用途<input id="edit-merchant" placeholder="未指定"></label>
+        <label class="wide">备注（可选）<input id="edit-note" placeholder="补充细节"></label>
+      </div>
+      <div class="panel-actions"><button id="delete-transaction" class="button danger" type="button">删除账单</button><span class="spacer"></span><button id="cancel-edit" class="button" type="button">取消</button><button class="button primary" type="submit">保存修改</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="account-dialog">
+    <form id="account-edit-form" class="dialog-body">
+      <div class="dialog-heading"><h2>编辑资金账户</h2><button id="close-account" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="account-edit-original" type="hidden">
+      <div class="form-grid">
+        <label>账户名称<input id="account-edit-name" required maxlength="40"></label>
+        <label>类型<select id="account-edit-kind"><option value="wallet">电子钱包</option><option value="bank">银行卡</option><option value="cash">现金</option><option value="other">其他</option></select></label>
+        <label>当前实际余额<input id="account-edit-balance" required step="0.01" type="number"></label>
+        <label>截至日期<input id="account-edit-date" required type="date"></label>
+      </div>
+      <p class="dialog-note">保存余额会作为一次对账记录，不会虚构收入或支出。</p>
+      <div class="panel-actions"><button id="delete-account" class="button danger" type="button">删除账户</button><span class="spacer"></span><button id="cancel-account" class="button" type="button">取消</button><button class="button primary" type="submit">保存修改</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="model-dialog">
+    <form id="model-form" class="dialog-body">
+      <div class="dialog-heading"><h2>切换 LLM</h2><button id="close-model" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <label class="dialog-field">服务
+        <select id="model-provider"></select>
+      </label>
+      <label class="dialog-field">模型
+        <select id="model-preset"></select>
+      </label>
+      <label id="custom-model-field" class="dialog-field" hidden>自定义模型名<input id="custom-model" maxlength="128" autocomplete="off" placeholder="provider/model-name"></label>
+      <p class="dialog-note">API Key 仅由本地服务读取，不会发送到浏览器。</p>
+      <div class="panel-actions"><button id="cancel-model" class="button" type="button">取消</button><button class="button primary" type="submit">应用模型</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="subscription-dialog">
+    <form id="subscription-edit-form" class="dialog-body">
+      <div class="dialog-heading"><h2>编辑订阅</h2><button id="close-subscription" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="subscription-edit-id" type="hidden">
+      <div class="form-grid">
+        <label>订阅名称<input id="subscription-edit-name" required maxlength="80"></label>
+        <label>扣款金额<input id="subscription-edit-amount" required min="0.01" step="0.01" type="number"></label>
+        <label>扣款周期<select id="subscription-edit-cycle"><option value="1">每月</option><option value="3">每季</option><option value="6">每半年</option><option value="12">每年</option></select></label>
+        <label>下次扣款<input id="subscription-edit-date" required type="date"></label>
+        <label>分类<input id="subscription-edit-category" list="category-values"></label>
+        <label>支付方式<input id="subscription-edit-account" list="payment-methods"></label>
+        <label class="wide">备注（可选）<input id="subscription-edit-note" maxlength="300"></label>
+      </div>
+      <label class="check-field"><input id="subscription-edit-active" type="checkbox">启用此订阅</label>
+      <div class="panel-actions"><button id="cancel-subscription" class="button" type="button">取消</button><button class="button primary" type="submit">保存修改</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="liability-dialog">
+    <form id="liability-edit-form" class="dialog-body">
+      <div class="dialog-heading"><h2>编辑待还</h2><button id="close-liability" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="liability-edit-id" type="hidden">
+      <div class="form-grid">
+        <label>项目名称<input id="liability-edit-name" required maxlength="80"></label>
+        <label>平台 / 发卡行<input id="liability-edit-provider" maxlength="80"></label>
+        <label>类型<select id="liability-edit-kind"><option value="consumer_credit">消费信贷</option><option value="credit_card">信用卡</option><option value="installment">分期</option><option value="other">其他</option></select></label>
+        <label>本月应还<input id="liability-edit-due-amount" required min="0" step="0.01" type="number"></label>
+        <label>还款日（可选）<input id="liability-edit-due-date" type="date"></label>
+        <label>最低还款<input id="liability-edit-minimum" required min="0" step="0.01" type="number"></label>
+        <label>还款方式<input id="liability-edit-account" list="payment-methods"></label>
+        <label>额度（可选）<input id="liability-edit-limit" min="0" step="0.01" type="number"></label>
+        <label class="wide">备注（可选）<input id="liability-edit-note" maxlength="300"></label>
+      </div>
+      <label class="check-field"><input id="liability-edit-active" type="checkbox">启用此待还项目</label>
+      <div class="panel-actions"><button id="cancel-liability" class="button" type="button">取消</button><button class="button primary" type="submit">保存修改</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="capital-dialog">
+    <form id="capital-form" class="dialog-body">
+      <div class="dialog-heading"><h2>校准当前本金</h2><button id="close-capital" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <p id="capital-note" class="dialog-note"></p>
+      <label class="dialog-field">当前可用金额<input id="capital-current" required min="0" step="0.01" type="number"></label>
+      <p class="dialog-note">本金只代表你当前可用的钱。之后会按收入、支出和实际登记的还款自动滚动到下个月。</p>
+      <div class="panel-actions"><button id="cancel-capital" class="button" type="button">取消</button><button class="button primary" type="submit">保存本金</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="payment-dialog">
+    <form id="payment-form" class="dialog-body">
+      <div class="dialog-heading"><h2 id="payment-dialog-title">登记还款</h2><button id="close-payment" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="payment-id" type="hidden">
+      <input id="payment-liability-id" type="hidden">
+      <input id="payment-statement-month" type="hidden">
+      <p id="payment-note" class="dialog-note"></p>
+      <label class="dialog-field">还款金额<input id="payment-amount" required min="0.01" step="0.01" type="number"></label>
+      <label class="dialog-field">还款日期<input id="payment-date" required type="date"></label>
+      <label class="dialog-field">还款方式<input id="payment-account" list="payment-methods" placeholder="未指定"></label>
+      <label class="dialog-field">备注（可选）<input id="payment-comment" maxlength="300"></label>
+      <div class="panel-actions"><button id="delete-payment" class="button danger" type="button" hidden>撤销还款</button><span class="spacer"></span><button id="cancel-payment" class="button" type="button">取消</button><button id="save-payment" class="button primary" type="submit">确认还款</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="reference-dialog">
+    <form id="reference-form" class="dialog-body">
+      <div class="dialog-heading"><h2 id="reference-title">新增分类</h2><button id="close-reference" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="reference-kind" type="hidden"><input id="reference-original" type="hidden">
+      <label class="dialog-field">标准名称<input id="reference-name" required maxlength="40"></label>
+      <label class="dialog-field">别名<input id="reference-aliases" maxlength="300" placeholder="用逗号分隔，例如：吃饭，外卖"></label>
+      <label class="check-field"><input id="reference-favorite" type="checkbox">设为常用</label>
+      <div class="panel-actions"><button id="cancel-reference" class="button" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="merge-dialog">
+    <form id="merge-form" class="dialog-body">
+      <div class="dialog-heading"><h2>合并名称</h2><button id="close-merge" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="merge-kind" type="hidden"><input id="merge-source" type="hidden">
+      <p id="merge-note" class="dialog-note"></p>
+      <label class="dialog-field">合并到<select id="merge-target" required></select></label>
+      <div class="panel-actions"><button id="cancel-merge" class="button" type="button">取消</button><button class="button danger" type="submit">确认合并</button></div>
+    </form>
+  </dialog>
+
+  <datalist id="payment-methods">
+    <option value="微信"></option>
+    <option value="支付宝"></option>
+    <option value="现金"></option>
+    <option value="银行卡"></option>
+    <option value="信用卡"></option>
+  </datalist>
+  <datalist id="category-values"></datalist>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
