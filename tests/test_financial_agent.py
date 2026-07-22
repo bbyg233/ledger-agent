@@ -1487,6 +1487,10 @@ def test_native_tool_plan_uses_small_safe_toolsets_for_common_actions():
     assert native_agent_tool_plan("微信转到支付宝 100 元").tool_names == (
         "ask_clarification", "get_account_balances", "propose_account_transfer"
     )
+    subscription_plan = native_agent_tool_plan("建立每月 20 日扣款的视频会员")
+    assert subscription_plan.profile == "general"
+    assert "propose_subscriptions" in subscription_plan.tool_names
+    assert "record_transactions" not in subscription_plan.tool_names
     assert native_agent_tool_plan("本月钱花在哪").tool_names == ("aggregate_spending",)
 
 

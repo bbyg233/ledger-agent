@@ -34,7 +34,9 @@ def native_agent_tool_plan(text: str, *, has_images: bool = False) -> NativeTool
                 "propose_liability_payment", "propose_liability_statement",
             ),
         )
-    if "订阅" in compact or any(term in compact for term in ("会员扣款", "自动续费", "续费")):
+    if "订阅" in compact or any(
+        term in compact for term in ("会员", "自动扣款", "自动续费", "续费")
+    ):
         return NativeToolPlan(
             "general",
             (
