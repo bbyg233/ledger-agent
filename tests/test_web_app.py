@@ -80,8 +80,10 @@ def test_agent_tool_catalog_exposes_schemas_and_risk_metadata():
         "analyze_spending_trend",
         "compare_spending_periods",
         "find_recurring_expenses",
+        "get_account_balances",
         "get_subscriptions",
         "get_liabilities",
+        "propose_account_transfer",
         "propose_subscriptions",
         "propose_subscription_charge",
         "propose_subscription_skip",
@@ -124,18 +126,19 @@ def test_agent_management_drafts_require_confirmation_before_any_write(tmp_path,
     draft_response = client.post(
         "/api/chat", json={"text": "帮我建立一个每月 20 日扣 25 元的视频会员", "session_id": "management"}
     )
+    assert draft_response.status_code == 200, draft_response.text
+    draft_payload = draft_response.json()
     before = client.get("/api/subscriptions", params={"month": "2026-07"})
     confirmed = client.post(
         "/api/management-proposals/confirm",
         json={
-            "request_id": draft_response.json()["request_id"],
-            "proposals": draft_response.json()["proposals"],
+            "request_id": draft_payload["request_id"],
+            "proposals": draft_payload["proposals"],
         },
     )
     after = client.get("/api/subscriptions", params={"month": "2026-07"})
 
-    assert draft_response.status_code == 200
-    assert draft_response.json()["kind"] == "management_drafts"
+    assert draft_payload["kind"] == "management_drafts"
     assert before.json()["items"] == []
     assert confirmed.json()["applied"] == 1
     assert after.json()["items"][0]["name"] == "视频会员"
@@ -367,7 +370,10 @@ def test_dashboard_separates_payment_month_from_statement_month(tmp_path, monkey
     assert july["forecast"]["liability_paid"] == 0
     assert july["forecast"]["repayment_outflow"] == 205
     assert july["forecast"]["cash_change"] == -205
-    assert july["recent"][0] == {
+    recent_payment = next(
+        item for item in july["recent"] if item["record_type"] == "liability_payment"
+    )
+    assert recent_payment == {
         "id": paid.json()["payment"]["payment_id"],
         "date": "2026-07-16",
         "amount": 205.0,
@@ -383,7 +389,7 @@ def test_dashboard_separates_payment_month_from_statement_month(tmp_path, monkey
         "source_id": liability["id"],
         "suggested_category": "",
         "needs_category_review": 0,
-        "created_at": july["recent"][0]["created_at"],
+        "created_at": recent_payment["created_at"],
     }
     assert august["forecast"]["liability_paid"] == 205
     assert august["forecast"]["liability_remaining"] == 0
