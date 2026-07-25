@@ -87,37 +87,31 @@ def resolve_credit_charge_statement_month(
     charged_at: str,
     requested_month: str,
 ) -> str:
-    """Keep a credit purchase out of a statement whose due date has passed.
+    """Resolve a credit purchase to the repayment month of its next due date.
 
-    The model proposes a statement month, but a known repayment schedule is a
-    stronger source of truth. For example, a purchase on July 21 cannot belong
-    to a statement due on July 3; it belongs to the next known due statement.
-    Explicitly chosen future/current statements remain unchanged.
+    A model often uses the purchase month as ``requested_month``. In this
+    ledger, however, a statement month means the month in which that credit
+    bill is repaid. A July purchase tied to an August 3 due date therefore
+    belongs to the August statement. Known due dates take precedence over the
+    model proposal; without a future due date, preserve the requested month.
     """
     charged_on = date.fromisoformat(charged_at).isoformat()
     requested_month = normalize_month(requested_month)
-    requested_due = conn.execute(
+    next_due = conn.execute(
         """
-        SELECT due_date FROM liability_statements
-        WHERE liability_id = ? AND month = ?
-        """,
-        (liability_id[:80], requested_month),
-    ).fetchone()
-    if requested_due is None or not str(requested_due["due_date"] or ""):
-        return requested_month
-    if str(requested_due["due_date"]) >= charged_on:
-        return requested_month
-
-    next_statement = conn.execute(
-        """
-        SELECT month FROM liability_statements
+        SELECT month, due_date FROM liability_statements
         WHERE liability_id = ? AND due_date <> '' AND due_date >= ?
-        ORDER BY due_date, month
+        ORDER BY
+            CASE WHEN substr(due_date, 1, 7) = month THEN 0 ELSE 1 END,
+            due_date,
+            month
         LIMIT 1
         """,
         (liability_id[:80], charged_on),
     ).fetchone()
-    return str(next_statement["month"]) if next_statement is not None else requested_month
+    if next_due is None:
+        return requested_month
+    return normalize_month(str(next_due["due_date"])[:7])
 
 
 def liability_statement_balance(conn: sqlite3.Connection, liability_id: str) -> float:

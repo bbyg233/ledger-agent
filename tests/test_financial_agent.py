@@ -1275,6 +1275,33 @@ def test_agent_credit_charge_moves_a_purchase_after_due_date_to_next_statement(t
     assert proposal["projected_due_amount"] == 154.9
 
 
+def test_agent_credit_charge_uses_due_month_when_model_supplies_purchase_month(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    liability = create_liability(
+        conn,
+        {
+            "name": "美团月付", "provider": "美团", "kind": "consumer_credit",
+            "statement_month": "2026-08", "due_amount": 100, "due_date": "2026-08-03",
+        },
+        actor="test",
+    )
+
+    proposal = _tool_propose_liability_charge(
+        LiabilityChargeProposalInput(
+            charges=[{
+                "liability_id": liability["id"], "statement_month": "2026-07", "amount": 27.8,
+                "charged_at": "2026-07-24", "category": "餐饮", "merchant": "KFC",
+            }]
+        ),
+        ToolExecutionContext(state=conn, run_id="credit-charge-due-month"),
+    )["proposals"][0]
+
+    assert proposal["draft"]["statement_month"] == "2026-08"
+    assert proposal["statement_month_adjusted_from"] == "2026-07"
+    assert proposal["projected_due_amount"] == 127.8
+
+
 def test_agent_credit_charge_proposal_keeps_each_item_in_a_multi_charge_message(tmp_path):
     conn = connect(tmp_path / "ledger.db")
     init_db(conn)

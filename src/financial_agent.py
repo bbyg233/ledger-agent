@@ -2243,6 +2243,7 @@ AUDIT_LABELS = {
     "liability.payment": "登记还款",
     "liability.payment.update": "修改还款",
     "liability.payment.delete": "撤销还款",
+    "liability.charge.reassign": "修正信贷消费归属月份",
     "capital.set": "校准本金",
     "account.create": "新增资金账户",
     "account.update": "编辑资金账户",
