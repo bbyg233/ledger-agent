@@ -423,6 +423,32 @@ def test_explicit_statement_month_change_moves_existing_liability_statement(tmp_
     assert (september["items"][0]["payment_count"], september["items"][0]["paid_amount"]) == (1, 100)
 
 
+def test_init_does_not_backfill_a_second_statement_for_an_explicit_month(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    liability = create_liability(
+        conn,
+        {
+            "name": "京东月付",
+            "statement_month": "2026-08",
+            "due_amount": 566.1,
+            "due_date": "2026-09-15",
+        },
+        actor="test",
+    )
+
+    init_db(conn)
+    months = [
+        row["month"]
+        for row in conn.execute(
+            "SELECT month FROM liability_statements WHERE liability_id = ? ORDER BY month",
+            (liability["id"],),
+        ).fetchall()
+    ]
+
+    assert months == ["2026-08"]
+
+
 def test_personal_debt_can_use_statement_month_without_due_date(tmp_path):
     conn = connect(tmp_path / "ledger.db")
     init_db(conn)

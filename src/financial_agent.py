@@ -659,7 +659,7 @@ def backfill_liability_statements(conn: sqlite3.Connection) -> None:
         WHERE due_date <> ''
           AND NOT EXISTS (
               SELECT 1 FROM liability_statements
-              WHERE liability_id = liabilities.id AND month = substr(liabilities.due_date, 1, 7)
+              WHERE liability_id = liabilities.id
           )
         """
     ).fetchall()
