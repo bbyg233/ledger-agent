@@ -1503,6 +1503,7 @@ list_liability_accounts = _liabilities.list_liability_accounts
 get_liability_payment = _liabilities.get_liability_payment
 get_liability_charge = _liabilities.get_liability_charge
 record_liability_charge = _liabilities.record_liability_charge
+update_liability_charge = _liabilities.update_liability_charge
 record_liability_payment = _liabilities.record_liability_payment
 update_liability_payment = _liabilities.update_liability_payment
 delete_liability_payment = _liabilities.delete_liability_payment

@@ -274,6 +274,66 @@ def test_subscription_and_liability_endpoints_keep_charge_and_repayment_separate
     }
 
 
+def test_web_can_edit_credit_charge_and_recalculate_statements(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
+    liability = client.post(
+        "/api/liabilities",
+        json={
+            "name": "花呗", "provider": "支付宝", "kind": "consumer_credit",
+            "statement_month": "2026-07", "due_amount": 100, "due_date": "2026-07-10",
+        },
+    ).json()["liability"]
+    created = client.post(
+        f"/api/liabilities/{liability['id']}/charges",
+        json={
+            "amount": 20, "charged_at": "2026-07-08", "statement_month": "2026-07",
+            "category": "餐饮", "merchant": "午饭", "note": "原记录",
+        },
+    ).json()["charge"]
+
+    edited = client.patch(
+        f"/api/liability-charges/{created['id']}",
+        json={
+            "amount": 35, "charged_at": "2026-07-09", "statement_month": "2026-08",
+            "category": "购物", "merchant": "超市", "note": "修正后",
+        },
+    )
+    july = client.get("/api/liabilities", params={"month": "2026-07"}).json()
+    august = client.get("/api/liabilities", params={"month": "2026-08"}).json()
+
+    assert edited.status_code == 200
+    assert edited.json()["charge"]["merchant"] == "超市"
+    assert july["items"][0]["due_amount"] == 100
+    assert july["items"][0]["charges"] == []
+    assert august["items"][0]["due_amount"] == 35
+    assert august["items"][0]["charges"][0]["statement_month"] == "2026-08"
+
+
+def test_web_can_move_liability_statement_to_the_correct_month(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
+    liability = client.post(
+        "/api/liabilities",
+        json={
+            "name": "京东月付", "provider": "京东", "kind": "consumer_credit",
+            "statement_month": "2026-08", "due_amount": 566.1, "due_date": "2026-09-15",
+        },
+    ).json()["liability"]
+    moved = client.patch(
+        f"/api/liabilities/{liability['id']}",
+        json={
+            "source_statement_month": "2026-08", "statement_month": "2026-09",
+            "due_amount": 566.1, "due_date": "2026-09-15",
+        },
+    )
+    august = client.get("/api/liabilities", params={"month": "2026-08"}).json()
+    september = client.get("/api/liabilities", params={"month": "2026-09"}).json()
+
+    assert moved.status_code == 200
+    assert moved.json()["liability"]["statement_month"] == "2026-09"
+    assert august["items"] == []
+    assert september["items"][0]["due_amount"] == 566.1
+
+
 def test_web_can_correct_and_reverse_liability_payment(tmp_path, monkeypatch):
     monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
     liability = client.post(

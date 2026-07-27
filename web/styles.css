@@ -199,6 +199,9 @@ td.amount.repayment { color: var(--amber); }
 .liability-charge-row { display: flex; justify-content: space-between; gap: 16px; padding: 7px 0; font-size: 13px; }
 .liability-charge-row span { color: var(--muted); overflow-wrap: anywhere; }
 .liability-charge-row strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.liability-charge-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.liability-charge-actions .icon-button { width: 26px; height: 26px; color: var(--muted); }
+.liability-charge-actions .icon-button:hover { color: var(--accent); background: #e8f4ed; }
 .liability-charge-row.historical span { color: var(--amber); }
 .liability-charge-empty { color: var(--muted); font-size: 13px; padding: 7px 0; }
 .management-main, .management-meta { min-width: 0; }

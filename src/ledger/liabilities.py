@@ -273,38 +273,84 @@ def update_liability(
     item = _normalize_liability_payload(conn, merged)
     statement_month = str(changes.get("statement_month") or "")
     target_month = normalize_month(statement_month or str(item["due_date"])[:7] or core.current_month())
-    existing_statement = conn.execute(
-        "SELECT statement_amount, remaining_amount FROM liability_statements WHERE liability_id = ? AND month = ?",
-        (liability_id[:80], target_month),
-    ).fetchone()
-    if existing_statement is not None:
-        paid_amount = max(
-            0.0,
-            float(existing_statement["statement_amount"])
-            - float(existing_statement["remaining_amount"]),
+    source_value = str(changes.get("source_statement_month") or "")
+    source_month = normalize_month(source_value) if source_value else ""
+    move_statement = bool(source_month and source_month != target_month)
+
+    try:
+        if move_statement:
+            source_statement = conn.execute(
+                "SELECT id FROM liability_statements WHERE liability_id = ? AND month = ?",
+                (liability_id[:80], source_month),
+            ).fetchone()
+            if source_statement is None:
+                raise ValueError("原账单月份不存在，无法迁移")
+            target_statement = conn.execute(
+                "SELECT id FROM liability_statements WHERE liability_id = ? AND month = ?",
+                (liability_id[:80], target_month),
+            ).fetchone()
+            if target_statement is not None:
+                raise ValueError("目标账单月份已存在，请分别编辑两份账单")
+            conn.execute(
+                "UPDATE liability_statements SET month = ?, updated_at = ? WHERE id = ?",
+                (target_month, core.now_iso(), source_statement["id"]),
+            )
+            conn.execute(
+                "UPDATE liability_charges SET statement_month = ? WHERE liability_id = ? AND statement_month = ?",
+                (target_month, liability_id[:80], source_month),
+            )
+            conn.execute(
+                "UPDATE liability_payments SET statement_month = ? WHERE liability_id = ? AND statement_month = ?",
+                (target_month, liability_id[:80], source_month),
+            )
+
+        existing_statement = conn.execute(
+            "SELECT statement_amount, remaining_amount FROM liability_statements WHERE liability_id = ? AND month = ?",
+            (liability_id[:80], target_month),
+        ).fetchone()
+        if existing_statement is not None:
+            paid_amount = max(
+                0.0,
+                float(existing_statement["statement_amount"])
+                - float(existing_statement["remaining_amount"]),
+            )
+            if float(item["due_amount"]) < paid_amount:
+                raise ValueError(f"账单应还不能低于已还金额 {paid_amount:.2f}")
+        statement = _upsert_liability_statement(conn, liability_id, item, target_month)
+        outstanding_balance = liability_statement_balance(conn, liability_id)
+        conn.execute(
+            """
+            UPDATE liabilities
+            SET name = ?, provider = ?, kind = ?, outstanding_balance = ?, due_amount = ?, due_date = ?,
+                minimum_payment = ?, repayment_account = ?, credit_limit = ?, note = ?, is_active = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                item["name"], item["provider"], item["kind"], outstanding_balance,
+                item["due_amount"], item["due_date"], item["minimum_payment"],
+                item["repayment_account"], item["credit_limit"], item["note"],
+                item["is_active"], core.now_iso(), liability_id[:80],
+            ),
         )
-        if float(item["due_amount"]) < paid_amount:
-            raise ValueError(f"本月应还不能低于已还金额 {paid_amount:.2f}")
-    statement = _upsert_liability_statement(conn, liability_id, item, statement_month)
-    outstanding_balance = liability_statement_balance(conn, liability_id)
-    conn.execute(
-        """
-        UPDATE liabilities
-        SET name = ?, provider = ?, kind = ?, outstanding_balance = ?, due_amount = ?, due_date = ?,
-            minimum_payment = ?, repayment_account = ?, credit_limit = ?, note = ?, is_active = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            item["name"], item["provider"], item["kind"], outstanding_balance,
-            item["due_amount"], item["due_date"], item["minimum_payment"],
-            item["repayment_account"], item["credit_limit"], item["note"],
-            item["is_active"], core.now_iso(), liability_id[:80],
-        ),
-    )
-    after = get_liability_for_month(conn, liability_id, statement["month"])
-    core.audit(conn, "liability.update", {"id": liability_id[:80], "before": before, "after": after}, source=actor)
-    if commit:
-        conn.commit()
+        after = get_liability_for_month(conn, liability_id, statement["month"])
+        core.audit(
+            conn,
+            "liability.update",
+            {
+                "id": liability_id[:80],
+                "before": before,
+                "after": after,
+                "source_statement_month": source_month,
+                "statement_month": target_month,
+            },
+            source=actor,
+        )
+        if commit:
+            conn.commit()
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
     return after
 
 
@@ -413,7 +459,7 @@ def list_liabilities(
                 dict(row)
                 for row in conn.execute(
                     """
-                    SELECT id, charged_at, amount, category, merchant, note, created_at
+                    SELECT id, statement_month, charged_at, amount, category, merchant, note, created_at
                     FROM liability_charges
                     WHERE liability_id = ? AND statement_month = ?
                     ORDER BY charged_at DESC, rowid DESC
@@ -682,6 +728,126 @@ def record_liability_charge(
             conn.rollback()
         raise
     return {"charge": get_liability_charge(conn, charge_id), "liability": after}
+
+
+def update_liability_charge(
+    conn: sqlite3.Connection,
+    charge_id: str,
+    changes: dict[str, Any],
+    actor: str = "web",
+    *,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Correct one credit purchase and keep every affected statement balanced."""
+    before = get_liability_charge(conn, charge_id)
+    liability_id = str(before["liability_id"])
+    old_month = normalize_month(str(before["statement_month"]))
+    clean = {
+        "amount": round(float(changes.get("amount", before["amount"])), 2),
+        "charged_at": date.fromisoformat(str(changes.get("charged_at", before["charged_at"]))).isoformat(),
+        "statement_month": normalize_month(str(changes.get("statement_month", old_month))),
+        "category": core.canonical_reference(
+            conn, "category", str(changes.get("category", before["category"]) or "待分类")
+        ),
+        "merchant": str(changes.get("merchant", before["merchant"])).strip()[:80],
+        "note": str(changes.get("note", before["note"])).strip()[:300],
+    }
+    if clean["amount"] <= 0:
+        raise ValueError("信用消费金额必须大于 0")
+    if not clean["merchant"]:
+        raise ValueError("信用消费需要填写商户或用途")
+
+    target_month = clean["statement_month"]
+    if target_month != old_month:
+        target_statement = get_liability_for_month(conn, liability_id, target_month)
+        if not target_statement["has_statement"]:
+            _upsert_liability_statement(
+                conn,
+                liability_id,
+                {"due_amount": 0, "due_date": inherited_liability_due_date(conn, liability_id, target_month), "minimum_payment": 0},
+                target_month,
+            )
+
+    affected_months = (old_month,) if target_month == old_month else (old_month, target_month)
+    statement_updates: dict[str, float] = {}
+    for month in affected_months:
+        statement = conn.execute(
+            """
+            SELECT statement_amount FROM liability_statements
+            WHERE liability_id = ? AND month = ?
+            """,
+            (liability_id, month),
+        ).fetchone()
+        if statement is None:
+            raise ValueError("信用消费对应的月度账单不存在")
+        amount = float(statement["statement_amount"])
+        if month == old_month:
+            amount -= float(before["amount"])
+        if month == target_month:
+            amount += clean["amount"]
+        paid = float(
+            conn.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0) FROM liability_payments
+                WHERE liability_id = ? AND statement_month = ?
+                """,
+                (liability_id, month),
+            ).fetchone()[0]
+        )
+        if amount < paid - 0.001:
+            raise ValueError(f"{month} 账单已有还款 {paid:.2f}，不能把应还改低于已还金额")
+        statement_updates[month] = round(max(0.0, amount), 2)
+
+    now = core.now_iso()
+    try:
+        conn.execute(
+            """
+            UPDATE liability_charges
+            SET statement_month = ?, charged_at = ?, amount = ?, category = ?, merchant = ?, note = ?
+            WHERE id = ?
+            """,
+            (
+                clean["statement_month"], clean["charged_at"], clean["amount"], clean["category"],
+                clean["merchant"], clean["note"], charge_id[:80],
+            ),
+        )
+        for month, amount in statement_updates.items():
+            conn.execute(
+                """
+                UPDATE liability_statements
+                SET statement_amount = ?, remaining_amount = ?, updated_at = ?
+                WHERE liability_id = ? AND month = ?
+                """,
+                (
+                    amount,
+                    round(amount - float(conn.execute(
+                        """
+                        SELECT COALESCE(SUM(amount), 0) FROM liability_payments
+                        WHERE liability_id = ? AND statement_month = ?
+                        """,
+                        (liability_id, month),
+                    ).fetchone()[0]), 2),
+                    now,
+                    liability_id,
+                    month,
+                ),
+            )
+        _refresh_liability_outstanding_balance(conn, liability_id)
+        after = get_liability_charge(conn, charge_id)
+        liability = get_liability_for_month(conn, liability_id, target_month)
+        core.audit(
+            conn,
+            "liability.charge.update",
+            {"id": liability_id, "charge_id": charge_id[:80], "before": before, "after": after},
+            source=actor,
+        )
+        if commit:
+            conn.commit()
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
+    return {"charge": after, "liability": liability}
 
 
 def record_liability_payment(

@@ -82,13 +82,14 @@
           <label>项目名称<input id="liability-name" required maxlength="80" placeholder="例如：花呗"></label>
           <label>平台 / 发卡行<input id="liability-provider" maxlength="80" placeholder="例如：支付宝"></label>
           <label>类型<select id="liability-kind"><option value="consumer_credit">消费信贷</option><option value="credit_card">信用卡</option><option value="installment">分期</option><option value="other">其他</option></select></label>
-          <label>本月应还<input id="liability-due-amount" required min="0" step="0.01" type="number" value="0"></label>
+          <label>账单月份<input id="liability-statement-month" required type="month"></label>
+          <label>账单应还<input id="liability-due-amount" required min="0" step="0.01" type="number" placeholder="例如：566.10"></label>
           <label>还款日（可选）<input id="liability-due-date" type="date"></label>
-          <label>最低还款<input id="liability-minimum" min="0" step="0.01" type="number" value="0"></label>
+          <label>最低还款<input id="liability-minimum" min="0" step="0.01" type="number" placeholder="无最低还款可不填"></label>
           <label>还款方式<input id="liability-account" list="payment-methods" placeholder="未指定"></label>
           <label>额度（可选）<input id="liability-limit" min="0" step="0.01" type="number" placeholder="信用卡额度"></label>
           <label class="wide">备注（可选）<input id="liability-note" maxlength="300" placeholder="例如：7 月账单"></label>
-          <button id="liability-submit" class="button primary" type="submit">新增账户并保存本月账单</button>
+          <button id="liability-submit" class="button primary" type="submit">新增账户并保存账单</button>
         </form>
         <p class="management-note">还款只更新待还金额，不会自动新增支出账单，避免信用卡消费与还款重复统计。</p>
         <div id="liability-summary" class="management-summary"></div>
@@ -296,11 +297,13 @@
     <form id="liability-edit-form" class="dialog-body">
       <div class="dialog-heading"><h2>编辑待还</h2><button id="close-liability" class="icon-button" type="button" aria-label="关闭">×</button></div>
       <input id="liability-edit-id" type="hidden">
+      <input id="liability-edit-source-statement-month" type="hidden">
       <div class="form-grid">
         <label>项目名称<input id="liability-edit-name" required maxlength="80"></label>
         <label>平台 / 发卡行<input id="liability-edit-provider" maxlength="80"></label>
         <label>类型<select id="liability-edit-kind"><option value="consumer_credit">消费信贷</option><option value="credit_card">信用卡</option><option value="installment">分期</option><option value="other">其他</option></select></label>
-        <label>本月应还<input id="liability-edit-due-amount" required min="0" step="0.01" type="number"></label>
+        <label>账单月份<input id="liability-edit-statement-month" required type="month"></label>
+        <label>账单应还<input id="liability-edit-due-amount" required min="0" step="0.01" type="number"></label>
         <label>还款日（可选）<input id="liability-edit-due-date" type="date"></label>
         <label>最低还款<input id="liability-edit-minimum" required min="0" step="0.01" type="number"></label>
         <label>还款方式<input id="liability-edit-account" list="payment-methods"></label>
@@ -334,6 +337,23 @@
       <label class="dialog-field">还款方式<input id="payment-account" list="payment-methods" placeholder="未指定"></label>
       <label class="dialog-field">备注（可选）<input id="payment-comment" maxlength="300"></label>
       <div class="panel-actions"><button id="delete-payment" class="button danger" type="button" hidden>撤销还款</button><span class="spacer"></span><button id="cancel-payment" class="button" type="button">取消</button><button id="save-payment" class="button primary" type="submit">确认还款</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="liability-charge-dialog">
+    <form id="liability-charge-form" class="dialog-body">
+      <div class="dialog-heading"><h2>编辑信用消费</h2><button id="close-liability-charge" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="liability-charge-id" type="hidden">
+      <p id="liability-charge-note" class="dialog-note"></p>
+      <div class="form-grid">
+        <label>消费日期<input id="liability-charge-date" required type="date"></label>
+        <label>归属账单月<input id="liability-charge-month" required type="month"></label>
+        <label>金额<input id="liability-charge-amount" required min="0.01" step="0.01" type="number"></label>
+        <label>分类<input id="liability-charge-category" required list="category-values" maxlength="40"></label>
+        <label class="wide">商户 / 用途<input id="liability-charge-merchant" required maxlength="80"></label>
+        <label class="wide">备注（可选）<input id="liability-charge-comment" maxlength="300"></label>
+      </div>
+      <div class="panel-actions"><button id="cancel-liability-charge" class="button" type="button">取消</button><button class="button primary" type="submit">保存修改</button></div>
     </form>
   </dialog>
 

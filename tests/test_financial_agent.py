@@ -86,6 +86,7 @@ from financial_agent import (
     summarize,
     delete_liability_payment,
     update_liability_payment,
+    update_liability_charge,
     update_liability,
     upsert_budget,
     _tool_propose_liability_statement,
@@ -363,6 +364,63 @@ def test_liability_payment_updates_debt_without_creating_second_expense(tmp_path
     assert june["items"] == []
     assert june["available_months"] == ["2026-07", "2026-08"]
     assert june["suggested_month"] == "2026-07"
+
+
+def test_explicit_statement_month_change_moves_existing_liability_statement(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    liability = create_liability(
+        conn,
+        {
+            "name": "京东月付",
+            "provider": "京东",
+            "statement_month": "2026-08",
+            "due_amount": 500,
+            "due_date": "2026-09-15",
+            "repayment_account": "微信",
+        },
+        actor="test",
+    )
+    record_liability_charge(
+        conn,
+        liability["id"],
+        66.1,
+        "2026-07-27",
+        statement_month="2026-08",
+        category="购物",
+        merchant="京东",
+        actor="test",
+    )
+    record_liability_payment(
+        conn,
+        liability["id"],
+        100,
+        "2026-08-10",
+        statement_month="2026-08",
+        payment_account="微信",
+        actor="test",
+    )
+
+    moved = update_liability(
+        conn,
+        liability["id"],
+        {
+            "source_statement_month": "2026-08",
+            "statement_month": "2026-09",
+            "due_amount": 566.1,
+            "due_date": "2026-09-15",
+        },
+        actor="test",
+    )
+    august = list_liabilities(conn, "2026-08")
+    september = list_liabilities(conn, "2026-09")
+
+    assert moved["statement_month"] == "2026-09"
+    assert (moved["due_amount"], moved["remaining_amount"]) == (566.1, 466.1)
+    assert august["items"] == []
+    assert september["available_months"] == ["2026-09"]
+    assert september["items"][0]["charges"][0]["statement_month"] == "2026-09"
+    assert (september["items"][0]["payment_count"], september["items"][0]["paid_amount"]) == (1, 100)
 
 
 def test_personal_debt_can_use_statement_month_without_due_date(tmp_path):
@@ -1208,6 +1266,46 @@ def test_credit_charge_is_generic_and_does_not_move_asset_balance(tmp_path):
     assert liability_details["charges"][0]["merchant"] == "午饭"
     assert liability_details["charge_total"] == 35.5
     assert liability_details["unitemized_amount"] == 120
+
+
+def test_editing_credit_charge_moves_it_between_statement_months(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    liability = create_liability(
+        conn,
+        {
+            "name": "花呗", "provider": "支付宝", "kind": "consumer_credit",
+            "statement_month": "2026-07", "due_amount": 100, "due_date": "2026-07-10",
+        },
+        actor="test",
+    )
+    created = record_liability_charge(
+        conn, liability["id"], 20, "2026-07-08", "2026-07", "餐饮", "午饭", actor="test"
+    )
+
+    result = update_liability_charge(
+        conn,
+        created["charge"]["id"],
+        {
+            "amount": 35,
+            "charged_at": "2026-07-09",
+            "statement_month": "2026-08",
+            "category": "购物",
+            "merchant": "超市",
+            "note": "修正后",
+        },
+        actor="test",
+    )
+
+    july = get_liability_for_month(conn, liability["id"], "2026-07")
+    august = get_liability_for_month(conn, liability["id"], "2026-08")
+    assert result["charge"]["statement_month"] == "2026-08"
+    assert result["charge"]["merchant"] == "超市"
+    assert july["due_amount"] == 100
+    assert july["remaining_amount"] == 100
+    assert august["due_amount"] == 35
+    assert august["remaining_amount"] == 35
+    assert liability_outstanding_total(conn) == 135
 
 
 def test_agent_credit_charge_proposal_targets_any_existing_liability(tmp_path):

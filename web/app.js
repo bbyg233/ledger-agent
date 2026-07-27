@@ -857,9 +857,9 @@ function managementDraftEditor(proposal, index) {
         <label>平台 / 发卡行<input data-managed-field="provider" value="${escapeHtml(draft.provider || "")}"></label>
         <label>类型<select data-managed-field="kind"><option value="consumer_credit" ${draft.kind === "consumer_credit" ? "selected" : ""}>消费信贷</option><option value="credit_card" ${draft.kind === "credit_card" ? "selected" : ""}>信用卡</option><option value="installment" ${draft.kind === "installment" ? "selected" : ""}>分期</option><option value="other" ${draft.kind === "other" ? "selected" : ""}>其他</option></select></label>
         <label>账单月份<input data-managed-field="statement_month" type="month" value="${escapeHtml(draft.statement_month || "")}"></label>
-        <label>本月应还<input data-managed-field="due_amount" data-managed-number type="number" min="0" step="0.01" value="${escapeHtml(draft.due_amount)}"></label>
+        <label>本月应还<input data-managed-field="due_amount" data-managed-number type="number" min="0" step="0.01" value="${escapeHtml(draft.due_amount || "")}"></label>
         <label>还款日（可选）<input data-managed-field="due_date" type="date" value="${escapeHtml(draft.due_date || "")}"></label>
-        <label>最低还款<input data-managed-field="minimum_payment" data-managed-number type="number" min="0" step="0.01" value="${escapeHtml(draft.minimum_payment || 0)}"></label>
+        <label>最低还款<input data-managed-field="minimum_payment" data-managed-number type="number" min="0" step="0.01" value="${escapeHtml(draft.minimum_payment || "")}" placeholder="无最低还款可不填"></label>
         <label>还款方式<input data-managed-field="repayment_account" list="payment-methods" value="${escapeHtml(editableValue(draft.repayment_account))}"></label>
         <label>额度（可选）<input data-managed-field="credit_limit" data-managed-number data-managed-nullable type="number" min="0" step="0.01" value="${escapeHtml(draft.credit_limit ?? "")}"></label>
         <label class="wide">备注（可选）<input data-managed-field="note" value="${escapeHtml(draft.note || "")}"></label>
@@ -1847,7 +1847,7 @@ async function loadLiabilities() {
       const chargeRows = charges.map((charge) => `
         <div class="liability-charge-row">
           <span>${escapeHtml(charge.charged_at)} · ${escapeHtml(charge.category || "待分类")} · ${escapeHtml(charge.merchant || "未说明")}</span>
-          <strong>${money(charge.amount)}</strong>
+          <div class="liability-charge-actions"><strong>${money(charge.amount)}</strong><button class="icon-button" type="button" data-edit-liability-charge="${escapeHtml(charge.id)}" aria-label="编辑消费" title="编辑消费">&#9998;</button></div>
         </div>`).join("");
       const historicalRow = Number(item.unitemized_amount || 0) > 0
         ? `<div class="liability-charge-row historical"><span>未说明的历史消费</span><strong>${money(item.unitemized_amount)}</strong></div>`
@@ -1891,7 +1891,7 @@ async function saveLiability(event) {
     name: $("liability-name").value.trim(),
     provider: $("liability-provider").value.trim(),
     kind: $("liability-kind").value,
-    statement_month: $("month").value,
+    statement_month: $("liability-statement-month").value,
     due_amount: Number($("liability-due-amount").value),
     due_date: $("liability-due-date").value,
     minimum_payment: Number($("liability-minimum").value),
@@ -1906,11 +1906,12 @@ async function saveLiability(event) {
     await request(url, { method: existingId ? "PATCH" : "POST", body: JSON.stringify(payload) });
     event.target.reset();
     $("liability-existing").value = "";
-    $("liability-due-amount").value = "0";
-    $("liability-minimum").value = "0";
+    $("liability-due-amount").value = "";
+    $("liability-minimum").value = "";
     $("liability-due-date").value = "";
-    $("liability-submit").textContent = "新增账户并保存本月账单";
-    toast(existingId ? "本月账单已保存" : "待还账户和本月账单已新增");
+    $("liability-statement-month").value = $("month").value;
+    $("liability-submit").textContent = "新增账户并保存账单";
+    toast(existingId ? "账单已保存" : "待还账户和账单已新增");
     await Promise.all([loadLiabilities(), loadDashboard()]);
   } catch (error) {
     toast(error.message);
@@ -1925,35 +1926,74 @@ function selectLiabilityAccount() {
     $("liability-name").value = "";
     $("liability-provider").value = "";
     $("liability-kind").value = "consumer_credit";
-    $("liability-due-amount").value = 0;
+    $("liability-statement-month").value = $("month").value;
+    $("liability-due-amount").value = "";
     $("liability-due-date").value = "";
-    $("liability-minimum").value = 0;
+    $("liability-minimum").value = "";
     $("liability-account").value = "";
     $("liability-limit").value = "";
     $("liability-note").value = "";
-    $("liability-submit").textContent = "新增账户并保存本月账单";
+    $("liability-submit").textContent = "新增账户并保存账单";
     return;
   }
   $("liability-name").value = account.name;
   $("liability-provider").value = account.provider || "";
   $("liability-kind").value = account.kind;
+  $("liability-statement-month").value = $("month").value;
   $("liability-account").value = editableValue(account.repayment_account);
   $("liability-limit").value = account.credit_limit ?? "";
   $("liability-note").value = account.note || "";
-  $("liability-due-amount").value = statement?.due_amount ?? 0;
+  $("liability-due-amount").value = statement?.due_amount ?? "";
   $("liability-due-date").value = statement?.due_date || "";
-  $("liability-minimum").value = statement?.minimum_payment ?? 0;
-  $("liability-submit").textContent = statement ? "更新本月账单" : "新增本月账单";
+  $("liability-minimum").value = statement?.minimum_payment ?? "";
+  $("liability-submit").textContent = statement ? "更新账单" : "新增账单";
+}
+
+function alignDueDateWithStatementMonth(dateInputId, statementMonthId) {
+  const dateInput = $(dateInputId);
+  const statementMonth = $(statementMonthId).value;
+  if (!/^\d{4}-\d{2}$/.test(statementMonth)) return;
+  const currentDay = /^\d{4}-\d{2}-(\d{2})$/.exec(dateInput.value)?.[1] || "01";
+  const [year, month] = statementMonth.split("-").map(Number);
+  const lastDay = new Date(year, month, 0).getDate();
+  dateInput.value = `${statementMonth}-${String(Math.min(Number(currentDay), lastDay)).padStart(2, "0")}`;
+}
+
+function prepareLiabilityDueDatePicker(dateInputId, statementMonthId) {
+  const dateInput = $(dateInputId);
+  if (!dateInput.value) alignDueDateWithStatementMonth(dateInputId, statementMonthId);
+}
+
+async function loadLiabilityStatementForForm() {
+  const id = $("liability-existing").value;
+  const statementMonth = $("liability-statement-month").value;
+  if (!statementMonth) return;
+  if (!id) {
+    alignDueDateWithStatementMonth("liability-due-date", "liability-statement-month");
+    return;
+  }
+  try {
+    const data = await request(`/api/liabilities?month=${encodeURIComponent(statementMonth)}`);
+    const statement = (data.items || []).find((item) => item.id === id && !item.is_carried_forward);
+    $("liability-due-amount").value = statement?.due_amount ?? "";
+    $("liability-due-date").value = statement?.due_date || "";
+    $("liability-minimum").value = statement?.minimum_payment ?? "";
+    if (!statement) alignDueDateWithStatementMonth("liability-due-date", "liability-statement-month");
+    $("liability-submit").textContent = statement ? "更新账单" : "新增账单";
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function openLiabilityEditor(id, statementMonth = "") {
   const item = state.liabilities.find((value) => value.id === id && (!statementMonth || value.statement_month === statementMonth));
   if (!item) return;
-  $("liability-edit-form").dataset.statementMonth = item.statement_month;
   $("liability-edit-id").value = item.id;
+  $("liability-edit-source-statement-month").value = item.statement_month;
   $("liability-edit-name").value = item.name;
   $("liability-edit-provider").value = item.provider || "";
   $("liability-edit-kind").value = item.kind;
+  $("liability-edit-statement-month").value = item.statement_month;
   $("liability-edit-due-amount").value = item.due_amount;
   $("liability-edit-due-date").value = item.due_date;
   $("liability-edit-minimum").value = item.minimum_payment;
@@ -1972,7 +2012,8 @@ async function saveLiabilityEdit(event) {
     name: $("liability-edit-name").value.trim(),
     provider: $("liability-edit-provider").value.trim(),
     kind: $("liability-edit-kind").value,
-    statement_month: $("liability-edit-form").dataset.statementMonth || $("month").value,
+    statement_month: $("liability-edit-statement-month").value,
+    source_statement_month: $("liability-edit-source-statement-month").value,
     due_amount: Number($("liability-edit-due-amount").value),
     due_date: $("liability-edit-due-date").value,
     minimum_payment: Number($("liability-edit-minimum").value),
@@ -2006,6 +2047,53 @@ function openPaymentDialog(id, statementMonth = "") {
   $("delete-payment").hidden = true;
   $("save-payment").textContent = "确认还款";
   $("payment-dialog").showModal();
+}
+
+function findLiabilityCharge(chargeId) {
+  for (const liability of state.liabilities) {
+    const charge = (liability.charges || []).find((item) => item.id === chargeId);
+    if (charge) return { charge, liability };
+  }
+  return null;
+}
+
+function openLiabilityChargeEditor(chargeId) {
+  const found = findLiabilityCharge(chargeId);
+  if (!found) return;
+  const { charge, liability } = found;
+  $("liability-charge-id").value = charge.id;
+  $("liability-charge-note").textContent = `${liability.name} · 当前归属 ${charge.statement_month} 账单。修改金额或归属月份会同步调整对应账单的应还、未还和当前负债。`;
+  $("liability-charge-date").value = charge.charged_at;
+  $("liability-charge-month").value = charge.statement_month;
+  $("liability-charge-amount").value = Number(charge.amount).toFixed(2);
+  $("liability-charge-category").value = charge.category || "待分类";
+  $("liability-charge-merchant").value = charge.merchant || "";
+  $("liability-charge-comment").value = charge.note || "";
+  $("liability-charge-dialog").showModal();
+}
+
+async function saveLiabilityChargeEdit(event) {
+  event.preventDefault();
+  const chargeId = $("liability-charge-id").value;
+  const payload = {
+    charged_at: $("liability-charge-date").value,
+    statement_month: $("liability-charge-month").value,
+    amount: Number($("liability-charge-amount").value),
+    category: $("liability-charge-category").value.trim(),
+    merchant: $("liability-charge-merchant").value.trim(),
+    note: $("liability-charge-comment").value.trim(),
+  };
+  try {
+    await request(`/api/liability-charges/${encodeURIComponent(chargeId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    $("liability-charge-dialog").close();
+    toast("信用消费已更新");
+    await Promise.all([loadLiabilities(), loadDashboard(), loadBills(), loadLogs()]);
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function openPaymentEditor(paymentId) {
@@ -2294,13 +2382,25 @@ $("reconcile-account").addEventListener("change", () => {
   if (account) $("reconcile-balance").value = Number(account.balance).toFixed(2);
 });
 $("liability-existing").addEventListener("change", selectLiabilityAccount);
+$("liability-statement-month").addEventListener("change", loadLiabilityStatementForForm);
+$("liability-edit-statement-month").addEventListener("change", () => {
+  alignDueDateWithStatementMonth("liability-edit-due-date", "liability-edit-statement-month");
+});
+$("liability-due-date").addEventListener("pointerdown", () => {
+  prepareLiabilityDueDatePicker("liability-due-date", "liability-statement-month");
+});
+$("liability-edit-due-date").addEventListener("pointerdown", () => {
+  prepareLiabilityDueDatePicker("liability-edit-due-date", "liability-edit-statement-month");
+});
 $("liability-edit-form").addEventListener("submit", saveLiabilityEdit);
 $("liability-list").addEventListener("click", (event) => {
   const payment = event.target.closest("[data-pay-liability]");
   const edit = event.target.closest("[data-edit-liability]");
+  const chargeEdit = event.target.closest("[data-edit-liability-charge]");
   const detail = event.target.closest("[data-toggle-liability-charges]");
   if (payment) openPaymentDialog(payment.dataset.payLiability, payment.dataset.statementMonth);
   if (edit) openLiabilityEditor(edit.dataset.editLiability, edit.dataset.statementMonth);
+  if (chargeEdit) openLiabilityChargeEditor(chargeEdit.dataset.editLiabilityCharge);
   if (detail) {
     const key = detail.dataset.toggleLiabilityCharges;
     if (state.expandedLiabilityCharges.has(key)) state.expandedLiabilityCharges.delete(key);
@@ -2320,6 +2420,9 @@ $("payment-form").addEventListener("submit", saveLiabilityPayment);
 $("delete-payment").addEventListener("click", deletePayment);
 $("close-payment").addEventListener("click", () => $("payment-dialog").close());
 $("cancel-payment").addEventListener("click", () => $("payment-dialog").close());
+$("liability-charge-form").addEventListener("submit", saveLiabilityChargeEdit);
+$("close-liability-charge").addEventListener("click", () => $("liability-charge-dialog").close());
+$("cancel-liability-charge").addEventListener("click", () => $("liability-charge-dialog").close());
 $("edit-capital").addEventListener("click", openCapitalEditor);
 $("capital-form").addEventListener("submit", saveCapital);
 $("close-capital").addEventListener("click", () => $("capital-dialog").close());
@@ -2432,6 +2535,7 @@ $("view-settings").addEventListener("click", (event) => {
   if (restore) restoreLedgerBackup(restore.dataset.restoreBackup);
 });
 $("month").addEventListener("change", async () => {
+  if (!$("liability-existing").value) $("liability-statement-month").value = $("month").value;
   await loadDashboard();
   if (state.activeView === "bills") await loadBills();
   if (state.activeView === "budgets") await loadBudgets();
@@ -2440,6 +2544,7 @@ $("month").addEventListener("change", async () => {
 });
 
 $("month").value = new Date().toISOString().slice(0, 7);
+$("liability-statement-month").value = $("month").value;
 $("subscription-next-date").value = new Date().toISOString().slice(0, 10);
 $("liability-due-date").value = "";
 $("transfer-date").value = new Date().toISOString().slice(0, 10);

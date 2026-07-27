@@ -88,6 +88,7 @@ from financial_agent import (
     set_capital_balance,
     skip_subscription_charge,
     update_liability,
+    update_liability_charge,
     update_liability_payment,
     update_subscription,
 )
@@ -168,6 +169,7 @@ class LiabilityChanges(BaseModel):
     provider: str | None = Field(default=None, max_length=80)
     kind: str | None = Field(default=None, max_length=30)
     statement_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    source_statement_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
     due_amount: float | None = Field(default=None, ge=0)
     due_date: str | None = Field(default=None, pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
     minimum_payment: float | None = Field(default=None, ge=0)
@@ -199,6 +201,15 @@ class LiabilityCharge(BaseModel):
     category: str = Field(min_length=1, max_length=40)
     merchant: str = Field(min_length=1, max_length=80)
     note: str = Field(default="", max_length=300)
+
+
+class LiabilityChargeChanges(BaseModel):
+    amount: float | None = Field(default=None, gt=0)
+    charged_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    statement_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    category: str | None = Field(default=None, min_length=1, max_length=40)
+    merchant: str | None = Field(default=None, min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=300)
 
 
 class CapitalPayload(BaseModel):
@@ -910,6 +921,19 @@ def charge_liability(liability_id: str, payload: LiabilityCharge) -> dict[str, A
                 payload.category,
                 payload.merchant,
                 payload.note,
+            )
+    except (ValueError, TypeError) as exc:
+        raise api_error(exc) from exc
+
+
+@app.patch("/api/liability-charges/{charge_id}")
+def edit_liability_charge(
+    charge_id: str, payload: LiabilityChargeChanges
+) -> dict[str, Any]:
+    try:
+        with database() as conn:
+            return update_liability_charge(
+                conn, charge_id, payload.model_dump(exclude_unset=True)
             )
     except (ValueError, TypeError) as exc:
         raise api_error(exc) from exc
