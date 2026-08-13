@@ -22,7 +22,9 @@ jobs:
           cache-environment: true
       - name: Lint Python
         shell: bash -l {0}
-        run: micromamba run -n financial-agent ruff check src tests
+        run: |
+          micromamba run -n financial-agent ruff --version
+          micromamba run -n financial-agent ruff check --select E4,E7,E9,F src tests
       - name: Test
         shell: bash -l {0}
         run: micromamba run -n financial-agent bash -lc 'PYTHONPATH=src pytest -q'
