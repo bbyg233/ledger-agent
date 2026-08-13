@@ -1256,7 +1256,13 @@ def test_payment_method_usage_includes_repayments_and_transfers(tmp_path):
         actor="test",
     )
     record_liability_payment(
-        conn, liability["id"], 100, "2026-07-09", payment_account="微信", actor="test"
+        conn,
+        liability["id"],
+        100,
+        "2026-07-09",
+        statement_month="2026-07",
+        payment_account="微信",
+        actor="test",
     )
     create_transfer(conn, "微信", "支付宝", 20, "2026-07-10", actor="test")
 

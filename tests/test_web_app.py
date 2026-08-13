@@ -90,6 +90,8 @@ def test_agent_tool_catalog_exposes_schemas_and_risk_metadata():
         "propose_liability_statement",
         "propose_liability_payment",
         "propose_liability_charge",
+        "manage_daily_reminder",
+        "remember_personal_preference",
         "generate_monthly_report",
     }
     assert tools["record_transactions"]["risk"] == "write"
@@ -227,31 +229,33 @@ def test_agent_payment_draft_updates_existing_liability_only_after_confirmation(
 
 def test_subscription_and_liability_endpoints_keep_charge_and_repayment_separate(tmp_path, monkeypatch):
     monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
+    today = calendar_date.today().isoformat()
+    month = today[:7]
     subscription = client.post(
         "/api/subscriptions",
         json={
             "name": "视频会员", "amount": 25, "cycle_months": 1,
-            "next_charge_date": "2026-07-10", "category": "娱乐", "account": "微信",
+            "next_charge_date": today, "category": "娱乐", "account": "微信",
         },
     )
     liability = client.post(
         "/api/liabilities",
         json={
             "name": "信用卡", "provider": "银行", "kind": "credit_card",
-            "due_amount": 400, "due_date": "2026-07-15",
+            "statement_month": month, "due_amount": 400, "due_date": today,
             "minimum_payment": 40, "repayment_account": "银行卡",
         },
     )
     charged = client.post(f"/api/subscriptions/{subscription.json()['subscription']['id']}/charge")
     paid = client.post(
         f"/api/liabilities/{liability.json()['liability']['id']}/payments",
-        json={"amount": 100, "paid_at": "2026-07-12", "statement_month": "2026-07"},
+        json={"amount": 100, "paid_at": today, "statement_month": month},
     )
-    dashboard = client.get("/api/dashboard", params={"month": "2026-07"})
-    financial_records = client.get("/api/financial-records", params={"month": "2026-07"}).json()
+    dashboard = client.get("/api/dashboard", params={"month": month})
+    financial_records = client.get("/api/financial-records", params={"month": month}).json()
     repayment_records = client.get(
         "/api/financial-records",
-        params={"month": "2026-07", "direction": "repayment", "query": "信用卡"},
+        params={"month": month, "direction": "repayment", "query": "信用卡"},
     ).json()
 
     assert charged.status_code == 200
@@ -262,7 +266,7 @@ def test_subscription_and_liability_endpoints_keep_charge_and_repayment_separate
     assert dashboard.json()["summary"]["expense"] == 25
     assert {item["direction"] for item in financial_records["results"]} == {"expense", "repayment", "liability"}
     assert len(repayment_records["results"]) == 1
-    assert repayment_records["results"][0]["statement_month"] == "2026-07"
+    assert repayment_records["results"][0]["statement_month"] == month
     assert dashboard.json()["forecast"] == {
         "scheduled_subscriptions": 0.0,
         "liability_due": 400.0,
@@ -410,6 +414,7 @@ def test_web_subscription_charge_requires_special_reverse(tmp_path, monkeypatch)
 
 def test_dashboard_separates_payment_month_from_statement_month(tmp_path, monkeypatch):
     monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
+    monkeypatch.setattr("financial_agent.now_iso", lambda: "2026-07-16T12:00:00")
     liability = client.post(
         "/api/liabilities",
         json={
