@@ -126,6 +126,8 @@ def test_native_responses_loop_returns_function_output_to_previous_response():
     result = loop.run("system", "user", responses_api=True)
 
     assert result.final_text == "结果是 8。"
+    assert requests[0]["tool_choice"] == "required"
+    assert requests[1]["tool_choice"] == "auto"
     assert requests[1]["previous_response_id"] == "resp-1"
     assert requests[1]["input"][0]["type"] == "function_call_output"
     assert requests[1]["input"][0]["call_id"] == "call-r1"
@@ -185,6 +187,48 @@ def test_native_responses_loop_retries_one_malformed_tool_call_before_execution(
     assert [call.call_id for call in result.calls] == ["call-valid"]
     assert "previous_response_id" not in requests[1]
     assert requests[2]["previous_response_id"] == "resp-valid"
+
+
+def test_native_responses_loop_retries_an_empty_initial_tool_turn():
+    responses = [
+        SimpleNamespace(id="resp-empty", output=[], output_text="我先直接回答。"),
+        SimpleNamespace(
+            id="resp-valid",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    call_id="call-valid",
+                    name="double",
+                    arguments='{"value":4}',
+                )
+            ],
+            output_text="",
+        ),
+        SimpleNamespace(id="resp-final", output=[], output_text="结果是 8。"),
+    ]
+    requests = []
+
+    def create(**kwargs):
+        requests.append(deepcopy(kwargs))
+        return responses.pop(0)
+
+    registry = ToolRegistry(
+        [ToolSpec("double", "翻倍", ValueInput, lambda payload, context: {"value": payload.value * 2})]
+    )
+    loop = NativeToolLoop(
+        client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+        model="demo",
+        registry=registry,
+        runner=AgentRunner(registry),
+        context=ToolExecutionContext(state=None, run_id="native-empty-tool-retry"),
+        safe_output=lambda name, output: output,
+    )
+
+    result = loop.run("system", "user", responses_api=True)
+
+    assert result.final_text == "结果是 8。"
+    assert [request["tool_choice"] for request in requests] == ["required", "required", "auto"]
+    assert [call.call_id for call in result.calls] == ["call-valid"]
 
 
 def test_registry_exports_both_openai_tool_schema_shapes():

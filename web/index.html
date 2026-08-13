@@ -18,6 +18,7 @@
         <button class="nav-button" data-view="subscriptions" type="button"><b>↻</b><span>订阅</span></button>
         <button class="nav-button" data-view="liabilities" type="button"><b>!</b><span>待还</span></button>
         <button class="nav-button" data-view="logs" type="button"><b>≡</b><span>日志</span></button>
+        <button class="nav-button" data-view="memory" type="button"><b>◈</b><span>偏好记忆</span></button>
         <button class="nav-button" data-view="settings" type="button"><b>⚙</b><span>账本设置</span></button>
       </nav>
       <button id="model-settings" class="runtime-status" type="button" title="切换模型">
@@ -28,9 +29,13 @@
 
     <main class="workspace">
       <header class="topbar">
-        <div><h1 id="view-title">财务助理</h1><p id="view-subtitle">自然语言记账与查询</p></div>
+        <div class="topbar-title">
+          <div class="title-line"><h1 id="view-title">财务助理</h1></div>
+          <p id="view-subtitle">自然语言记账与查询</p>
+        </div>
         <div class="topbar-actions">
           <button id="clear-chat" class="icon-button chat-clear" type="button" title="清空聊天记录" aria-label="清空聊天记录">×</button>
+          <button id="open-reminder-settings" class="icon-button reminder-button" type="button" title="每日提醒" aria-label="每日提醒"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"></circle><path d="M12 9v4l2 2"></path><path d="m5 3-3 3"></path><path d="m19 3 3 3"></path><path d="m6.4 18.7-2.4 2.3"></path><path d="m17.6 18.7 2.4 2.3"></path></svg></button>
           <button id="model-settings-mobile" class="icon-button mobile-model-settings" type="button" title="切换模型" aria-label="切换模型">⚙</button>
           <input id="month" class="month-input" type="month" aria-label="查看月份">
         </div>
@@ -82,6 +87,7 @@
           <label>项目名称<input id="liability-name" required maxlength="80" placeholder="例如：花呗"></label>
           <label>平台 / 发卡行<input id="liability-provider" maxlength="80" placeholder="例如：支付宝"></label>
           <label>类型<select id="liability-kind"><option value="consumer_credit">消费信贷</option><option value="credit_card">信用卡</option><option value="installment">分期</option><option value="other">其他</option></select></label>
+          <label>每月出账日（可选）<select id="liability-statement-day"></select></label>
           <label>账单月份<input id="liability-statement-month" required type="month"></label>
           <label>账单应还<input id="liability-due-amount" required min="0" step="0.01" type="number" placeholder="例如：566.10"></label>
           <label>还款日（可选）<input id="liability-due-date" type="date"></label>
@@ -105,7 +111,14 @@
         </div>
         <div class="table-wrap">
           <table class="financial-table">
-            <thead><tr><th>日期</th><th>对象 / 用途</th><th>类型 / 分类</th><th>资金账户</th><th>金额</th><th aria-label="操作"></th></tr></thead>
+            <thead><tr>
+              <th scope="col" aria-sort="descending"><button class="table-sort" type="button" data-bill-sort="date">日期 <span class="sort-indicator" aria-hidden="true">↓</span></button></th>
+              <th scope="col" aria-sort="none"><button class="table-sort" type="button" data-bill-sort="subject">对象 / 用途 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th scope="col" aria-sort="none"><button class="table-sort" type="button" data-bill-sort="category">类型 / 分类 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th scope="col" aria-sort="none"><button class="table-sort" type="button" data-bill-sort="account">资金账户 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th scope="col" aria-sort="none"><button class="table-sort" type="button" data-bill-sort="amount">金额 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+              <th aria-label="操作"></th>
+            </tr></thead>
             <tbody id="bill-rows"></tbody>
           </table>
           <div id="bills-empty" class="table-empty" hidden>当前月份没有匹配资金记录</div>
@@ -189,6 +202,20 @@
           <div id="backup-list" class="backup-list"></div>
         </div>
       </section>
+
+      <section id="view-memory" class="view data-view memory-view">
+        <div class="memory-heading">
+          <h2>个人偏好记忆</h2>
+          <p>只保存你明确确认的长期规则。启用的内容会作为 Agent 的本地上下文；可随时编辑、停用或删除。</p>
+        </div>
+        <form id="personal-memory-form" class="memory-form">
+          <label>标题<input id="personal-memory-title" maxlength="60" placeholder="例如：默认支付账户" required></label>
+          <label class="wide">规则内容<textarea id="personal-memory-content" maxlength="500" rows="3" placeholder="例如：日常消费未说明账户时，优先使用微信；不确定时先追问。" required></textarea></label>
+          <button class="button primary" type="submit">添加记忆</button>
+        </form>
+        <div id="personal-memory-list" class="personal-memory-list"></div>
+        <div id="personal-memory-empty" class="table-empty" hidden>还没有个人偏好记忆</div>
+      </section>
     </main>
 
     <div id="insights-resizer" class="insights-resizer" role="separator" aria-label="调整右侧栏宽度" aria-orientation="vertical" tabindex="0" title="拖动调整右侧栏宽度"></div>
@@ -228,6 +255,16 @@
       <section><div class="section-heading"><h2>最近资金与待还记录</h2></div><div id="recent-transactions" class="recent-list"></div></section>
     </aside>
   </div>
+
+  <dialog id="reminder-dialog">
+    <form id="reminder-form" class="dialog-body reminder-form">
+      <div class="dialog-heading"><h2>每日记账提醒</h2><button id="close-reminder" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <label class="toggle-field"><input id="reminder-enabled" type="checkbox" checked><span>启用每日提醒</span></label>
+      <p id="reminder-status" class="dialog-note">正在读取提醒状态</p>
+      <label class="dialog-field">提醒时间<input id="reminder-time" type="time" value="22:00" required></label>
+      <div class="panel-actions"><button id="skip-reminder-today" class="button" type="button">今天不提醒</button><span class="spacer"></span><button id="save-reminder" class="button primary" type="submit">保存提醒</button></div>
+    </form>
+  </dialog>
 
   <dialog id="edit-dialog">
     <form id="edit-form" class="dialog-body">
@@ -302,6 +339,7 @@
         <label>项目名称<input id="liability-edit-name" required maxlength="80"></label>
         <label>平台 / 发卡行<input id="liability-edit-provider" maxlength="80"></label>
         <label>类型<select id="liability-edit-kind"><option value="consumer_credit">消费信贷</option><option value="credit_card">信用卡</option><option value="installment">分期</option><option value="other">其他</option></select></label>
+        <label>每月出账日（可选）<select id="liability-edit-statement-day"></select></label>
         <label>账单月份<input id="liability-edit-statement-month" required type="month"></label>
         <label>账单应还<input id="liability-edit-due-amount" required min="0" step="0.01" type="number"></label>
         <label>还款日（可选）<input id="liability-edit-due-date" type="date"></label>

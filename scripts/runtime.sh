@@ -64,3 +64,28 @@ ledger_python() {
   printf 'Or set LEDGER_AGENT_PYTHON to its Python executable.\n' >&2
   return 1
 }
+
+ledger_outbound_proxy() {
+  local explicit_proxy="${LEDGER_AGENT_PROXY_URL:-}"
+  local proxy_port="${LEDGER_AGENT_PROXY_PORT:-7890}"
+  local windows_host=""
+  local candidate=""
+
+  if [[ -n "$explicit_proxy" ]]; then
+    printf '%s\n' "$explicit_proxy"
+    return 0
+  fi
+  [[ "${LEDGER_AGENT_AUTO_PROXY:-1}" != "0" ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  windows_host="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
+  [[ -n "$windows_host" ]] || return 0
+  candidate="http://${windows_host}:${proxy_port}"
+
+  # A successful HTTP response, including Ark's expected unauthenticated 401,
+  # proves the local proxy can carry the model provider's HTTPS traffic.
+  if curl --noproxy '' -x "$candidate" --connect-timeout 2 --max-time 3 \
+    -sS -o /dev/null https://ark.cn-beijing.volces.com/api/v3/models; then
+    printf '%s\n' "$candidate"
+  fi
+}

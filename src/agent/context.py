@@ -19,6 +19,7 @@ from financial_agent import (
     now_iso,
     recent_messages,
 )
+from services.personal_memory import PERSONAL_MEMORY_PREFERENCE_KEY, normalize_personal_memories
 
 
 def set_preference(conn: sqlite3.Connection, key: str, value: Any) -> None:
@@ -117,6 +118,8 @@ def load_agent_context(conn: sqlite3.Connection, session_id: str, message_limit:
         liability_catalog=[
             {
                 "id": item["id"], "name": item["name"], "provider": item["provider"], "kind": item["kind"],
+                "statement_day": item["statement_day"],
+                "statement_month_offset": item["statement_month_offset"],
                 "statement_month": item["statement_month"], "due_amount": item["due_amount"],
                 "remaining_amount": item["remaining_amount"],
                 "due_date": item["due_date"], "minimum_payment": item["minimum_payment"],
@@ -178,6 +181,13 @@ def context_for_prompt(context: AgentContext, current_text: str = "") -> str:
             key: value for key, value in context.preferences.items()
             if key in {"default_account", "default_category"}
         },
+        "personal_memories": [
+            {"title": item["title"], "content": item["content"]}
+            for item in normalize_personal_memories(
+                context.preferences.get(PERSONAL_MEMORY_PREFERENCE_KEY, [])
+            )
+            if item["enabled"]
+        ][:20],
         "state": {
             key: context.state.get(key, "")
             for key in ("current_month", "last_action", "last_focus")

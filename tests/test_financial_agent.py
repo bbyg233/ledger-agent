@@ -46,6 +46,7 @@ from financial_agent import (
     narrate_monthly_report,
     normalize_openai_base_url,
     native_agent_tool_plan,
+    present_model_error,
     normalize_draft,
     merge_reference_value,
     planning_advice,
@@ -627,6 +628,33 @@ def test_account_balances_transfers_and_reconciliation_are_separate_from_income_
     assert account_balance(conn, "支付宝")["balance"] == 35
 
 
+def test_unassigned_transactions_are_included_in_unallocated_account_balance(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    today = date.today().isoformat()
+
+    reconcile_account(conn, "待分配余额", 0, today, actor="test")
+    income = add_transaction(
+        conn,
+        transaction(
+            320, "红包", transaction_date=today, direction="income",
+            category="其他收入", account="未指定",
+        ),
+        actor="test",
+    )
+    add_transaction(
+        conn,
+        transaction(20, "午饭", transaction_date=today, account="未指定"),
+        actor="test",
+    )
+
+    assert account_balance(conn, "待分配余额")["balance"] == 300
+
+    update_transaction(conn, income, {"account": "微信"}, actor="test")
+    assert account_balance(conn, "待分配余额")["balance"] == -20
+    assert account_balance(conn, "微信")["balance"] == 320
+
+
 def test_account_edit_and_delete_preserve_referenced_financial_history(tmp_path):
     conn = connect(tmp_path / "ledger.db")
     init_db(conn)
@@ -766,9 +794,32 @@ def test_explicit_database_environment_wins_over_dotenv(tmp_path, monkeypatch):
     assert os.environ["LEDGER_AGENT_DB"] == isolated
 
 
-def test_doubao_lite_uses_responses_api():
+def test_volcengine_responses_models_use_responses_api():
     assert llm_uses_responses_api("doubao-seed-2-0-lite-260428") is True
+    assert llm_uses_responses_api("deepseek-v4-flash-260425") is True
     assert llm_uses_responses_api("glm-5-2-260617") is False
+
+
+def test_volcengine_inference_endpoint_uses_responses_api(monkeypatch):
+    monkeypatch.setattr("financial_agent.llm_provider", lambda: "volcengine")
+
+    assert llm_uses_responses_api("ep-202608020001-example") is True
+
+
+def test_present_model_error_explains_missing_volcengine_endpoint():
+    message = present_model_error(
+        "Error code: 404 - {'error': {'code': 'InvalidEndpointOrModel.NotFound'}}",
+        provider="volcengine",
+    )
+
+    assert "推理接入点" in message
+    assert "ep-" in message
+
+
+def test_present_model_error_explains_volcengine_account_overdue():
+    message = present_model_error("AccountOverdueError", provider="volcengine")
+
+    assert "逾期欠费" in message
 
 
 def test_edit_delete_and_undo_transaction(tmp_path):
@@ -1426,6 +1477,109 @@ def test_agent_credit_charge_uses_due_month_when_model_supplies_purchase_month(t
     assert proposal["projected_due_amount"] == 127.8
 
 
+def test_credit_charge_uses_statement_day_and_revalidates_on_write(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    liability = create_liability(
+        conn,
+        {
+            "name": "美团月付", "provider": "美团", "kind": "consumer_credit",
+            "statement_day": 25, "statement_month": "2026-08", "due_amount": 100,
+            "due_date": "2026-08-03",
+        },
+        actor="test",
+    )
+
+    proposal = _tool_propose_liability_charge(
+        LiabilityChargeProposalInput(
+            charges=[{
+                "liability_id": liability["id"], "statement_month": "2026-08", "amount": 36.78,
+                "charged_at": "2026-08-01", "category": "餐饮", "merchant": "美团",
+            }]
+        ),
+        ToolExecutionContext(state=conn, run_id="credit-charge-statement-day"),
+    )["proposals"][0]
+
+    assert proposal["draft"]["statement_month"] == "2026-09"
+    assert proposal["statement_month_adjusted_from"] == "2026-08"
+
+    # The write path must enforce the same rule even if a stale UI payload says August.
+    created = record_liability_charge(
+        conn, liability["id"], 36.78, "2026-08-01", "2026-08", "餐饮", "美团", actor="test"
+    )
+    assert created["charge"]["statement_month"] == "2026-09"
+    assert get_liability_for_month(conn, liability["id"], "2026-08")["due_amount"] == 100
+    assert get_liability_for_month(conn, liability["id"], "2026-09")["due_amount"] == 36.78
+
+    before_statement = record_liability_charge(
+        conn, liability["id"], 20, "2026-08-24", "2026-09", "餐饮", "早餐", actor="test"
+    )
+    assert before_statement["charge"]["statement_month"] == "2026-09"
+
+    after_statement = record_liability_charge(
+        conn, liability["id"], 30, "2026-08-25", "2026-09", "餐饮", "晚饭", actor="test"
+    )
+    assert after_statement["charge"]["statement_month"] == "2026-10"
+
+
+def test_setting_liability_statement_day_does_not_change_existing_statement(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    liability = create_liability(
+        conn,
+        {
+            "name": "美团月付", "provider": "美团", "kind": "consumer_credit",
+            "statement_month": "2026-08", "due_amount": 436.55, "due_date": "2026-08-03",
+        },
+        actor="test",
+    )
+    update_liability(conn, liability["id"], {"statement_day": 25}, actor="test")
+
+    august = get_liability_for_month(conn, liability["id"], "2026-08")
+    assert august["due_amount"] == 436.55
+    assert august["due_date"] == "2026-08-03"
+    assert august["statement_day"] == 25
+
+
+def test_credit_charge_supports_jd_and_alipay_billing_cycles(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    init_db(conn)
+    jd = create_liability(
+        conn,
+        {
+            "name": "京东月付", "provider": "京东", "kind": "consumer_credit",
+            "statement_day": 6, "statement_month_offset": 0,
+            "statement_month": "2026-08", "due_amount": 0, "due_date": "2026-08-15",
+        },
+        actor="test",
+    )
+    alipay = create_liability(
+        conn,
+        {
+            "name": "支付宝花呗", "provider": "支付宝", "kind": "consumer_credit",
+            "statement_day": 1, "statement_month_offset": 0,
+            "statement_month": "2026-09", "due_amount": 0, "due_date": "2026-09-08",
+        },
+        actor="test",
+    )
+
+    assert record_liability_charge(
+        conn, jd["id"], 10, "2026-07-06", "2026-07", "购物", "京东", actor="test"
+    )["charge"]["statement_month"] == "2026-08"
+    assert record_liability_charge(
+        conn, jd["id"], 20, "2026-08-05", "2026-09", "购物", "京东", actor="test"
+    )["charge"]["statement_month"] == "2026-08"
+    assert record_liability_charge(
+        conn, jd["id"], 30, "2026-08-06", "2026-08", "购物", "京东", actor="test"
+    )["charge"]["statement_month"] == "2026-09"
+    assert record_liability_charge(
+        conn, alipay["id"], 40, "2026-08-01", "2026-08", "餐饮", "花呗", actor="test"
+    )["charge"]["statement_month"] == "2026-09"
+    assert record_liability_charge(
+        conn, alipay["id"], 50, "2026-08-31", "2026-08", "餐饮", "花呗", actor="test"
+    )["charge"]["statement_month"] == "2026-09"
+
+
 def test_agent_credit_charge_proposal_keeps_each_item_in_a_multi_charge_message(tmp_path):
     conn = connect(tmp_path / "ledger.db")
     init_db(conn)
@@ -1643,6 +1797,8 @@ def test_native_tool_plan_uses_small_safe_toolsets_for_common_actions():
     assert "propose_subscriptions" in subscription_plan.tool_names
     assert "record_transactions" not in subscription_plan.tool_names
     assert native_agent_tool_plan("本月钱花在哪").tool_names == ("aggregate_spending",)
+    assert native_agent_tool_plan("今晚九点提醒我记账").tool_names == ("manage_daily_reminder",)
+    assert native_agent_tool_plan("今天已经记完了").tool_names == ("manage_daily_reminder",)
 
 
 def test_merchant_memory_overrides_later_llm_guess(tmp_path):

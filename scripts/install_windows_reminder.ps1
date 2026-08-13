@@ -23,6 +23,7 @@ if ($Uninstall) {
     }
     $generatedFiles = @(
         (Join-Path $WrapperDir "daily_reminder.ps1"),
+        (Join-Path $WrapperDir "run_daily_reminder.vbs"),
         (Join-Path $WrapperDir "daily_reminder.log"),
         (Join-Path $WrapperDir "reminder.json")
     )
@@ -72,14 +73,17 @@ if (-not $WebUrl.StartsWith("http://127.0.0.1:")) {
 
 $wsl = Join-Path $env:SystemRoot "System32\wsl.exe"
 $execute = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
 $wrapperPath = Join-Path $WrapperDir "daily_reminder.ps1"
+$vbsPath = Join-Path $WrapperDir "run_daily_reminder.vbs"
 $wrapperLog = Join-Path $WrapperDir "daily_reminder.log"
 $reminderConfigPath = Join-Path $WrapperDir "reminder.json"
 $arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$wrapperPath`""
 
 if ($DryRun) {
     Write-Output "Task: $taskName"
-    Write-Output "Time: $Time"
+    Write-Output "Daily reminder time: $Time"
+    Write-Output "Schedule: runs once per day at this time"
     Write-Output "Execute: $execute"
     Write-Output "Arguments: $arguments"
     Write-Output "Wrapper: $wrapperPath"
@@ -94,6 +98,7 @@ $reminderConfig = [ordered]@{
     distro = $Distro
     projectPath = $ProjectPath.TrimEnd("/")
     webUrl = $WebUrl.TrimEnd("/")
+    defaultReminderTime = $Time
 }
 $reminderConfig | ConvertTo-Json | Set-Content -LiteralPath $reminderConfigPath -Encoding UTF8
 
@@ -104,35 +109,35 @@ $wrapper = @"
 `$wsl = "$wsl"
 `$config = Get-Content -Raw -LiteralPath $configLiteral | ConvertFrom-Json
 `$url = "`$(`$config.webUrl)/?view=chat&reminder=daily"
+`$webPort = ([Uri]`$config.webUrl).Port
+`$defaultReminderTime = [string]`$config.defaultReminderTime
 `$log = $logLiteral
 `$reminderScript = "`$(`$config.projectPath.TrimEnd('/'))/scripts/daily_reminder.sh"
 `$wslExitCode = 1
 
 try {
-    "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') reminder wrapper started" | Out-File -FilePath `$log -Append -Encoding utf8
-    `$previousReminderNoBrowser = `$env:LEDGER_REMINDER_NO_BROWSER
-    `$env:LEDGER_REMINDER_NO_BROWSER = "1"
     # Do not splat a native-command argument array here. Windows PowerShell can
     # pass it to WSL as a literal @-d token when this task runs non-interactively.
     if ([string]::IsNullOrWhiteSpace([string]`$config.distro)) {
-        & `$wsl "--exec" "bash" `$reminderScript *>> `$log
+        & `$wsl "--exec" "env" "LEDGER_AGENT_PORT=`$webPort" "LEDGER_REMINDER_DEFAULT_TIME=`$defaultReminderTime" "bash" `$reminderScript *>> `$log
     } else {
-        & `$wsl "-d" ([string]`$config.distro) "--exec" "bash" `$reminderScript *>> `$log
+        & `$wsl "-d" ([string]`$config.distro) "--exec" "env" "LEDGER_AGENT_PORT=`$webPort" "LEDGER_REMINDER_DEFAULT_TIME=`$defaultReminderTime" "bash" `$reminderScript *>> `$log
     }
-    `$env:LEDGER_REMINDER_NO_BROWSER = `$previousReminderNoBrowser
     `$wslExitCode = `$LASTEXITCODE
-    "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') WSL exit code: `$wslExitCode" | Out-File -FilePath `$log -Append -Encoding utf8
+    if (`$wslExitCode -eq 10) {
+        exit 0
+    }
     if (`$wslExitCode -ne 0) {
         throw "WSL reminder failed with exit code `$wslExitCode."
     }
 
+    "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') reminder due" | Out-File -FilePath `$log -Append -Encoding utf8
     Start-Sleep -Seconds 2
     Invoke-WebRequest -Uri "`$(`$config.webUrl)/api/health" -UseBasicParsing -TimeoutSec 15 | Out-Null
     if (`$env:LEDGER_REMINDER_NO_BROWSER -ne "1") {
         Start-Process `$url
     }
 } catch {
-    `$env:LEDGER_REMINDER_NO_BROWSER = `$previousReminderNoBrowser
     "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') reminder failed: `$(`$_.Exception.Message)" | Out-File -FilePath `$log -Append -Encoding utf8
     exit `$wslExitCode
 }
@@ -150,21 +155,16 @@ if ($parseErrors.Count -gt 0) {
 }
 Set-Content -Path $wrapperPath -Value $wrapper -Encoding UTF8
 
-$action = New-ScheduledTaskAction -Execute $execute -Argument $arguments -WorkingDirectory $WrapperDir
-$trigger = New-ScheduledTaskTrigger -Daily -At $Time
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -WakeToRun `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+$vbs = @"
+Set shell = CreateObject("WScript.Shell")
+shell.Run Chr(34) & "$execute" & Chr(34) & " -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & "$wrapperPath" & Chr(34), 0, False
+"@
+Set-Content -Path $vbsPath -Value $vbs -Encoding ASCII
 
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Description "Open the local Ledger Agent UI every day for bookkeeping." `
-    -Force | Out-Null
+$taskCommand = "`"$wscript`" `"$vbsPath`""
+& schtasks.exe /Create /TN $taskName /TR $taskCommand /SC DAILY /ST $Time /F | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to register scheduled task."
+}
 
 Write-Output "Installed scheduled task: $taskName at $Time"

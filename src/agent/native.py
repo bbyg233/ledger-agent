@@ -206,6 +206,7 @@ class NativeToolLoop:
         outcome = NativeAgentResult(calls=calls, results=results)
         model_calls = max(0, int(state.get("model_calls") or 0))
         invalid_argument_retries = 0
+        missing_tool_retries = 0
         for _ in range(model_calls, self.max_model_calls):
             self._checkpoint(
                 checkpoint_hook,
@@ -221,7 +222,7 @@ class NativeToolLoop:
                     temperature=0,
                     messages=messages,
                     tools=self.registry.chat_completion_tools(),
-                    tool_choice="auto",
+                    tool_choice="required" if not outcome.results else "auto",
                 )
             except Exception as exc:
                 raise NativeToolCallingError(
@@ -240,6 +241,9 @@ class NativeToolLoop:
             if not tool_calls:
                 final_text = (message.content or "").strip()
                 if not outcome.results:
+                    if missing_tool_retries < 1:
+                        missing_tool_retries += 1
+                        continue
                     raise NativeToolCallingError("模型没有调用任何账本工具")
                 outcome.final_text = final_text
                 return outcome
@@ -324,6 +328,7 @@ class NativeToolLoop:
         outcome = NativeAgentResult(calls=calls, results=results)
         model_calls = max(0, int(state.get("model_calls") or 0))
         invalid_argument_retries = 0
+        missing_tool_retries = 0
         for _ in range(model_calls, self.max_model_calls):
             self._checkpoint(
                 checkpoint_hook,
@@ -338,6 +343,7 @@ class NativeToolLoop:
                 "input": request_input,
                 "tools": self.registry.responses_tools(),
                 "store": True,
+                "tool_choice": "required" if not outcome.results else "auto",
             }
             if previous_response_id:
                 request["previous_response_id"] = previous_response_id
@@ -360,6 +366,9 @@ class NativeToolLoop:
             if not function_calls:
                 final_text = (response.output_text or "").strip()
                 if not outcome.results:
+                    if missing_tool_retries < 1:
+                        missing_tool_retries += 1
+                        continue
                     raise NativeToolCallingError("模型没有调用任何账本工具")
                 outcome.final_text = final_text
                 return outcome

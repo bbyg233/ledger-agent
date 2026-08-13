@@ -20,6 +20,12 @@ def _normalize_liability_payload(conn: sqlite3.Connection, payload: dict[str, An
     kind = str(payload.get("kind") or "other")
     if kind not in LIABILITY_KINDS:
         raise ValueError("待还类型无效")
+    statement_day = int(payload.get("statement_day") or 0)
+    if not 0 <= statement_day <= 31:
+        raise ValueError("出账日必须在每月 1 到 31 日之间")
+    statement_month_offset = int(payload.get("statement_month_offset", 1) or 0)
+    if statement_month_offset not in {0, 1}:
+        raise ValueError("账单归属规则无效")
     due_amount = round(float(payload.get("due_amount") or 0), 2)
     minimum_payment = round(float(payload.get("minimum_payment") or 0), 2)
     if min(due_amount, minimum_payment) < 0:
@@ -36,6 +42,8 @@ def _normalize_liability_payload(conn: sqlite3.Connection, payload: dict[str, An
         "name": name,
         "provider": str(payload.get("provider") or "").strip()[:80],
         "kind": kind,
+        "statement_day": statement_day,
+        "statement_month_offset": statement_month_offset,
         # Legacy compatibility cache. Available capital is stored separately.
         "outstanding_balance": due_amount,
         "due_amount": due_amount,
@@ -87,16 +95,30 @@ def resolve_credit_charge_statement_month(
     charged_at: str,
     requested_month: str,
 ) -> str:
-    """Resolve a credit purchase to the repayment month of its next due date.
+    """Resolve a credit purchase to its billing statement month.
 
-    A model often uses the purchase month as ``requested_month``. In this
-    ledger, however, a statement month means the month in which that credit
-    bill is repaid. A July purchase tied to an August 3 due date therefore
-    belongs to the August statement. Known due dates take precedence over the
-    model proposal; without a future due date, preserve the requested month.
+    The next cycle-switch day determines the statement event. Accounts then
+    choose whether the ledger statement is labelled with that event month or
+    the following month. This supports both a July 6 to August 5 cycle that
+    belongs to August, and a 25th statement that belongs to the month after
+    it. Accounts without a configured statement day keep the legacy
+    next-due-date behaviour so existing ledgers are not reclassified.
     """
-    charged_on = date.fromisoformat(charged_at).isoformat()
+    charged = date.fromisoformat(charged_at)
+    charged_on = charged.isoformat()
     requested_month = normalize_month(requested_month)
+    liability = get_liability(conn, liability_id)
+    statement_day = int(liability.get("statement_day") or 0)
+    if statement_day:
+        statement_month_offset = int(liability.get("statement_month_offset", 1) or 0)
+        last_day = calendar.monthrange(charged.year, charged.month)[1]
+        effective_day = min(statement_day, last_day)
+        purchase_month = f"{charged.year:04d}-{charged.month:02d}"
+        statement_event_month = (
+            _next_month(purchase_month) if charged.day >= effective_day else purchase_month
+        )
+        return _next_month(statement_event_month) if statement_month_offset else statement_event_month
+
     next_due = conn.execute(
         """
         SELECT month, due_date FROM liability_statements
@@ -236,9 +258,9 @@ def create_liability(
     conn.execute(
         """
         INSERT INTO liabilities
-            (id, name, provider, kind, outstanding_balance, due_amount, due_date, minimum_payment,
+            (id, name, provider, kind, statement_day, statement_month_offset, outstanding_balance, due_amount, due_date, minimum_payment,
              repayment_account, credit_limit, note, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (liability_id, *item.values(), now, now),
     )
@@ -259,7 +281,7 @@ def update_liability(
 ) -> dict[str, Any]:
     before = get_liability(conn, liability_id)
     allowed = {
-        "name", "provider", "kind", "due_amount", "due_date", "minimum_payment",
+        "name", "provider", "kind", "statement_day", "statement_month_offset", "due_amount", "due_date", "minimum_payment",
         "repayment_account", "credit_limit", "note", "is_active",
     }
     merged = {
@@ -271,6 +293,40 @@ def update_liability(
         },
     }
     item = _normalize_liability_payload(conn, merged)
+    statement_fields = {
+        "statement_month", "source_statement_month", "due_amount", "due_date", "minimum_payment",
+    }
+    account_only_update = not any(field in changes for field in statement_fields)
+    if account_only_update:
+        try:
+            conn.execute(
+                """
+                UPDATE liabilities
+                SET name = ?, provider = ?, kind = ?, statement_day = ?, statement_month_offset = ?, repayment_account = ?,
+                    credit_limit = ?, note = ?, is_active = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    item["name"], item["provider"], item["kind"], item["statement_day"], item["statement_month_offset"],
+                    item["repayment_account"], item["credit_limit"], item["note"], item["is_active"],
+                    core.now_iso(), liability_id[:80],
+                ),
+            )
+            after = get_liability(conn, liability_id)
+            core.audit(
+                conn,
+                "liability.update",
+                {"id": liability_id[:80], "before": before, "after": after, "account_only": True},
+                source=actor,
+            )
+            if commit:
+                conn.commit()
+            return after
+        except Exception:
+            if commit:
+                conn.rollback()
+            raise
+
     statement_month = str(changes.get("statement_month") or "")
     target_month = normalize_month(statement_month or str(item["due_date"])[:7] or core.current_month())
     source_value = str(changes.get("source_statement_month") or "")
@@ -321,12 +377,12 @@ def update_liability(
         conn.execute(
             """
             UPDATE liabilities
-            SET name = ?, provider = ?, kind = ?, outstanding_balance = ?, due_amount = ?, due_date = ?,
+            SET name = ?, provider = ?, kind = ?, statement_day = ?, statement_month_offset = ?, outstanding_balance = ?, due_amount = ?, due_date = ?,
                 minimum_payment = ?, repayment_account = ?, credit_limit = ?, note = ?, is_active = ?, updated_at = ?
             WHERE id = ?
             """,
             (
-                item["name"], item["provider"], item["kind"], outstanding_balance,
+                item["name"], item["provider"], item["kind"], item["statement_day"], item["statement_month_offset"], outstanding_balance,
                 item["due_amount"], item["due_date"], item["minimum_payment"],
                 item["repayment_account"], item["credit_limit"], item["note"],
                 item["is_active"], core.now_iso(), liability_id[:80],
@@ -367,7 +423,7 @@ def list_liabilities(
         clauses.append("s.month IS NOT NULL")
     sql = """
         SELECT
-            l.id, l.name, l.provider, l.kind, l.repayment_account, l.credit_limit,
+            l.id, l.name, l.provider, l.kind, l.statement_day, l.statement_month_offset, l.repayment_account, l.credit_limit,
             l.note, l.is_active, l.created_at, l.updated_at,
             s.month AS statement_month, s.statement_amount, s.remaining_amount,
             s.due_date AS statement_due_date, s.minimum_payment AS statement_minimum_payment,
@@ -395,7 +451,7 @@ def list_liabilities(
             carried_clauses.append("l.is_active = 1")
         carried_sql = f"""
             SELECT
-                l.id, l.name, l.provider, l.kind, l.repayment_account, l.credit_limit,
+                l.id, l.name, l.provider, l.kind, l.statement_day, l.statement_month_offset, l.repayment_account, l.credit_limit,
                 l.note, l.is_active, l.created_at, l.updated_at,
                 s.month AS statement_month, s.statement_amount, s.remaining_amount,
                 s.due_date AS statement_due_date, s.minimum_payment AS statement_minimum_payment,
@@ -426,6 +482,8 @@ def list_liabilities(
             "name": raw["name"],
             "provider": raw["provider"],
             "kind": raw["kind"],
+            "statement_day": int(raw["statement_day"] or 0),
+            "statement_month_offset": int(raw["statement_month_offset"] or 0),
             "repayment_account": raw["repayment_account"],
             "credit_limit": raw["credit_limit"],
             "note": raw["note"],
@@ -521,7 +579,7 @@ def list_liability_accounts(
     conn: sqlite3.Connection, include_inactive: bool = False
 ) -> list[dict[str, Any]]:
     sql = """
-        SELECT l.id, l.name, l.provider, l.kind, l.repayment_account, l.credit_limit,
+        SELECT l.id, l.name, l.provider, l.kind, l.statement_day, l.statement_month_offset, l.repayment_account, l.credit_limit,
                l.note, l.is_active, COUNT(s.id) AS statement_count, MAX(s.month) AS latest_month
         FROM liabilities l
         LEFT JOIN liability_statements s ON s.liability_id = l.id
@@ -646,7 +704,17 @@ def record_liability_charge(
     if amount <= 0:
         raise ValueError("信用消费金额必须大于 0")
     charged_at = date.fromisoformat(charged_at).isoformat()
-    statement_month = normalize_month(statement_month)
+    requested_statement_month = normalize_month(statement_month)
+    # Legacy accounts have no billing-cycle setting. Preserve their historical
+    # direct-write behaviour; accounts with a statement day are always
+    # revalidated here so a stale client cannot bypass the billing rule.
+    statement_month = (
+        resolve_credit_charge_statement_month(
+            conn, liability_id, charged_at, requested_statement_month
+        )
+        if int(liability.get("statement_day") or 0)
+        else requested_statement_month
+    )
     category = core.canonical_reference(conn, "category", category or "待分类")
     merchant = str(merchant).strip()[:80]
     if not merchant:
@@ -717,6 +785,7 @@ def record_liability_charge(
             {
                 "id": liability_id[:80], "charge_id": charge_id, "amount": amount,
                 "charged_at": charged_at, "statement_month": statement_month,
+                "requested_statement_month": requested_statement_month,
                 "category": category, "merchant": merchant, "before": before, "after": after,
             },
             source=actor,

@@ -56,7 +56,10 @@ DEFAULT_DB = Path(".financial_agent") / "ledger.db"
 MAX_CHAT_IMAGE_BYTES = 6 * 1024 * 1024
 DEFAULT_LLM_MODEL = "deepseek-v4-flash"
 DEFAULT_LLM_PROVIDER = "volcengine"
-RESPONSES_API_MODELS = {"doubao-seed-2-0-lite-260428"}
+RESPONSES_API_MODELS = {
+    "doubao-seed-2-0-lite-260428",
+    "deepseek-v4-flash-260425",
+}
 LLM_PROVIDERS = {
     "relay": {
         "label": "OpenAI-compatible",
@@ -73,8 +76,12 @@ LLM_PROVIDERS = {
         "base_url_env": "ARK_BASE_URL",
         "model_env": "ARK_MODEL",
         "default_base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "default_model": "glm-5-2-260617",
-        "models": ["glm-5-2-260617", "doubao-seed-2-0-lite-260428"],
+        "default_model": "deepseek-v4-flash-260425",
+        "models": [
+            "deepseek-v4-flash-260425",
+            "doubao-seed-2-0-lite-260428",
+            "glm-5-2-260617",
+        ],
     },
 }
 REVERSIBLE_ACTIONS = {"transaction.create", "transaction.update", "transaction.delete"}
@@ -422,6 +429,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             provider TEXT NOT NULL DEFAULT '',
             kind TEXT NOT NULL CHECK(kind IN ('credit_card', 'consumer_credit', 'installment', 'other')),
+            statement_day INTEGER NOT NULL DEFAULT 0 CHECK(statement_day BETWEEN 0 AND 31),
+            statement_month_offset INTEGER NOT NULL DEFAULT 1 CHECK(statement_month_offset IN (0, 1)),
             outstanding_balance REAL NOT NULL DEFAULT 0 CHECK(outstanding_balance >= 0),
             due_amount REAL NOT NULL DEFAULT 0 CHECK(due_amount >= 0),
             due_date TEXT NOT NULL,
@@ -534,6 +543,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "chat_requests", "has_images", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "liability_payments", "statement_month", "TEXT NOT NULL DEFAULT ''")
     ensure_column(conn, "liability_payments", "account", "TEXT NOT NULL DEFAULT '未指定'")
+    ensure_column(conn, "liabilities", "statement_day", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "liabilities", "statement_month_offset", "INTEGER NOT NULL DEFAULT 1")
     ensure_observability_schema(conn, ensure_column)
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_import_hash "
@@ -1957,7 +1968,26 @@ def llm_client():
 
 
 def llm_uses_responses_api(model: str | None = None) -> bool:
-    return (model or llm_model()) in RESPONSES_API_MODELS
+    selected_model = model or llm_model()
+    return selected_model in RESPONSES_API_MODELS or (
+        llm_provider() == "volcengine" and selected_model.startswith("ep-")
+    )
+
+
+def present_model_error(exc: Exception | str, *, provider: str | None = None) -> str:
+    """Turn provider errors into a short next step suitable for the local UI."""
+    detail = redact_sensitive_text(str(exc))
+    if "AccountOverdueError" in detail:
+        return "模型服务被火山方舟拦截：当前账号存在逾期欠费。请先在方舟控制台结清欠费或处理账单，再重新发送。"
+    if "InvalidEndpointOrModel.NotFound" in detail:
+        selected_provider = provider or llm_provider()
+        if selected_provider == "volcengine":
+            return (
+                "火山方舟无法调用当前模型或推理接入点。请在方舟控制台的“推理”中创建或启用"
+                "该模型的接入点，并在模型设置中填写该接入点 ID（通常以 ep- 开头）；"
+                "也可以切换到当前 API Key 已开通的模型。"
+            )
+    return detail[:300]
 
 
 def call_llm_content(system_prompt: str, user_prompt: str) -> str:

@@ -39,7 +39,7 @@ def model_safe_tool_output(tool_name: str, output: dict[str, Any]) -> dict[str, 
     if tool_name == "get_liabilities":
         data = output.get("liabilities") if isinstance(output.get("liabilities"), dict) else {}
         safe_fields = {
-            "id", "name", "provider", "kind", "statement_month", "due_amount", "remaining_amount", "due_date",
+            "id", "name", "provider", "kind", "statement_day", "statement_month_offset", "statement_month", "due_amount", "remaining_amount", "due_date",
             "paid_amount", "payment_count", "minimum_payment", "repayment_account", "credit_limit", "is_active", "payment_status",
             "is_carried_forward", "carried_from_month",
         }
@@ -153,6 +153,10 @@ def tool_call_agent_action(
         return AgentAction(action="liabilities", text=text, month=str(arguments.get("month") or ""))
     if call.name == "get_account_balances":
         return AgentAction(action="accounts", text=text)
+    if call.name == "manage_daily_reminder":
+        return AgentAction(action="reminder", text=text)
+    if call.name == "remember_personal_preference":
+        return AgentAction(action="memory", text=text)
     if call.name in {
         "propose_subscriptions",
         "propose_subscription_charge",

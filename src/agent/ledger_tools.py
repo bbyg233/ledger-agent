@@ -164,6 +164,8 @@ class LiabilityStatementProposalInput(ToolInput):
     name: str = Field(min_length=1, max_length=80, description="项目名称，例如花呗或招商银行信用卡")
     provider: str = Field(default="", max_length=80, description="平台或发卡行")
     kind: Literal["credit_card", "consumer_credit", "installment", "other"] = Field(default="other")
+    statement_day: int = Field(default=0, ge=0, le=31, description="每月出账日；未知留 0。系统按下一次出账日推算其后的还款账单月")
+    statement_month_offset: int = Field(default=1, ge=0, le=1, description="出账对应账单月：0 为出账当月，1 为出账后下月")
     statement_month: str = Field(
         pattern=r"^\d{4}-\d{2}$",
         description="这笔待还归属的月份；没有固定还款日时仍必须填写",
@@ -199,7 +201,7 @@ class LiabilityPaymentProposalInput(ToolInput):
 
 class LiabilityChargeItem(ToolInput):
     liability_id: str = Field(min_length=1, max_length=80, description="上下文中已有月付、花呗、信用卡等待还账户 ID")
-    statement_month: str = Field(pattern=r"^\d{4}-\d{2}$", description="这笔消费将增加到的待还账单月份")
+    statement_month: str = Field(pattern=r"^\d{4}-\d{2}$", description="模型推测的账单月份；系统会按账户出账日最终校正")
     amount: float = Field(gt=0, description="本次实际消费金额")
     charged_at: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="实际消费日期")
     category: str = Field(min_length=1, max_length=40, description="消费分类")
@@ -225,6 +227,35 @@ class AccountTransferProposalInput(ToolInput):
     amount: float = Field(gt=0, description="确定的实际转账金额")
     transferred_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="实际转账日期 YYYY-MM-DD")
     note: str = Field(default="", max_length=300, description="用户明确提供的补充说明")
+
+
+class DailyReminderInput(ToolInput):
+    enabled: bool | None = Field(
+        default=None,
+        description="是否启用每日记账提醒；用户未提及开关时留空",
+    )
+    time: str = Field(
+        default="",
+        pattern=r"^$|^(?:[01]\d|2[0-3]):[0-5]\d$",
+        description="提醒时间 HH:MM，例如 21:00；用户未指定时间时留空",
+    )
+    skip_today: bool | None = Field(
+        default=None,
+        description="今天不需要提醒时为 true，恢复今天的提醒时为 false；未提及今天时留空",
+    )
+
+
+class RememberPersonalPreferenceInput(ToolInput):
+    title: str = Field(
+        min_length=1,
+        max_length=60,
+        description="一句话概括偏好，例如默认支付账户、记账确认规则或分类习惯",
+    )
+    content: str = Field(
+        min_length=1,
+        max_length=500,
+        description="只记录用户明确要求长期记住的规则，不得自行推断或记录敏感凭证",
+    )
 
 
 LEDGER_TOOL_DEFINITIONS = (
@@ -330,6 +361,20 @@ LEDGER_TOOL_DEFINITIONS = (
         AccountTransferProposalInput,
         ToolRisk.WRITE,
         True,
+    ),
+    (
+        "manage_daily_reminder",
+        "读取或更新本地每日记账提醒。用于“今晚九点提醒我”“每天十点提醒”“今天已经记完不用提醒”“恢复今天提醒”等请求；只修改提醒设置，不触碰账本金额。",
+        DailyReminderInput,
+        ToolRisk.WRITE,
+        False,
+    ),
+    (
+        "remember_personal_preference",
+        "仅在用户明确说“记住”“以后默认”“以后按这个规则”时，新增一条本地个人偏好记忆。不能从普通账单、闲聊或模型猜测中自动写入；不会修改账本金额。",
+        RememberPersonalPreferenceInput,
+        ToolRisk.WRITE,
+        False,
     ),
     ("generate_monthly_report", "读取确定性统计并生成指定月份的复盘。", MonthInput, ToolRisk.READ_ONLY, False),
 )

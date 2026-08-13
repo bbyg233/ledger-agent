@@ -25,7 +25,13 @@ def native_agent_tool_plan(text: str, *, has_images: bool = False) -> NativeTool
         return NativeToolPlan("general", all_tools)
     compact = re.sub(r"\s+", "", text).casefold()
     credit_terms = ("花呗", "白条", "月付", "信用卡", "分期", "待还", "欠款")
+    reminder_terms = ("提醒", "闹钟", "记账时间", "今晚", "每天")
     query_terms = ("查询", "搜索", "查找", "汇总", "统计", "分析", "为什么", "趋势", "对比", "比较", "报告", "复盘")
+    today_complete = "今天" in compact and any(term in compact for term in ("记完", "记好了", "完成记账", "不用弹"))
+    if any(term in compact for term in reminder_terms) or today_complete:
+        return NativeToolPlan("reminder", ("manage_daily_reminder",))
+    if any(term in compact for term in ("记住", "以后默认", "以后按", "以后都按", "帮我记下")):
+        return NativeToolPlan("memory", ("remember_personal_preference",))
     if any(term in compact for term in credit_terms):
         return NativeToolPlan(
             "credit",

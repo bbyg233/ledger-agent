@@ -12,6 +12,7 @@ from agent.ledger_tools import (
     AccountQueryInput,
     AccountTransferProposalInput,
     ClarificationInput,
+    DailyReminderInput,
     LiabilityChargeProposalInput,
     LiabilityPaymentProposalInput,
     LiabilityQueryInput,
@@ -27,7 +28,19 @@ from agent.ledger_tools import (
     SubscriptionProposalInput,
     SubscriptionQueryInput,
     SubscriptionSkipProposalInput,
+    RememberPersonalPreferenceInput,
     build_ledger_tool_registry,
+)
+from services.reminder import (
+    REMINDER_PREFERENCE_KEY,
+    reminder_view,
+    set_reminder_skip_for_today,
+    update_reminder_settings,
+)
+from services.reminder_scheduler import schedule_windows_reminder_sync
+from services.personal_memory import (
+    PERSONAL_MEMORY_PREFERENCE_KEY,
+    create_personal_memory,
 )
 
 
@@ -412,6 +425,49 @@ def _tool_propose_account_transfer(
     }
 
 
+def _tool_manage_daily_reminder(
+    payload: DailyReminderInput, context: ToolExecutionContext
+) -> dict[str, Any]:
+    settings = core.get_preferences(context.state).get(REMINDER_PREFERENCE_KEY, {})
+    settings = update_reminder_settings(
+        settings,
+        enabled=payload.enabled,
+        reminder_time=payload.time or None,
+    )
+    if payload.skip_today is not None:
+        settings = set_reminder_skip_for_today(settings, skip=payload.skip_today)
+    core.set_preference(context.state, REMINDER_PREFERENCE_KEY, settings)
+    result = reminder_view(settings)
+    core.audit(context.state, "settings.reminder.agent", result, source="agent")
+    context.state.commit()
+    if payload.enabled is not None or payload.time:
+        result["scheduler_sync_scheduled"] = schedule_windows_reminder_sync(
+            result["time"], enabled=result["enabled"]
+        )
+    return {"reminder": result}
+
+
+def _tool_remember_personal_preference(
+    payload: RememberPersonalPreferenceInput, context: ToolExecutionContext
+) -> dict[str, Any]:
+    preferences = core.get_preferences(context.state)
+    memories, memory = create_personal_memory(
+        preferences.get(PERSONAL_MEMORY_PREFERENCE_KEY, []),
+        title=payload.title,
+        content=payload.content,
+        source="agent",
+    )
+    core.set_preference(context.state, PERSONAL_MEMORY_PREFERENCE_KEY, memories)
+    core.audit(
+        context.state,
+        "settings.personal_memory.agent",
+        {"id": memory["id"], "title": memory["title"]},
+        source="agent",
+    )
+    context.state.commit()
+    return {"memory": memory}
+
+
 def _tool_monthly_report(payload: MonthInput, context: ToolExecutionContext) -> dict[str, Any]:
     report = core.monthly_report(context.state, core.normalize_month(payload.month))
     if context.metadata.get("native_mode"):
@@ -440,6 +496,8 @@ def build_tool_registry():
             "propose_liability_payment": _tool_propose_liability_payment,
             "propose_liability_charge": _tool_propose_liability_charge,
             "propose_account_transfer": _tool_propose_account_transfer,
+            "manage_daily_reminder": _tool_manage_daily_reminder,
+            "remember_personal_preference": _tool_remember_personal_preference,
             "generate_monthly_report": _tool_monthly_report,
         }
     )

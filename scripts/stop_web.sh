@@ -4,6 +4,7 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pid_file="$project_dir/.financial_agent/web.pid"
 systemd_unit="ledger-agent-web.service"
+web_port="${LEDGER_AGENT_PORT:-8000}"
 declare -A project_pids=()
 
 is_project_web_pid() {
@@ -30,7 +31,7 @@ for proc in /proc/[0-9]*/cmdline; do
 done
 
 if command -v fuser >/dev/null 2>&1; then
-  for pid in $(fuser -n tcp 8000 2>/dev/null || true); do
+  for pid in $(fuser -n tcp "$web_port" 2>/dev/null || true); do
     if is_project_web_pid "$pid"; then
       project_pids["$pid"]=1
     fi

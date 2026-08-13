@@ -6,8 +6,9 @@ source "$project_dir/scripts/runtime.sh"
 runtime_dir="$project_dir/.financial_agent"
 pid_file="$runtime_dir/web.pid"
 log_file="$runtime_dir/web.log"
-python_bin="$(ledger_python)"
-health_url="http://127.0.0.1:8000/api/health"
+web_port="${LEDGER_AGENT_PORT:-8000}"
+web_url="http://127.0.0.1:${web_port}"
+health_url="${web_url}/api/health"
 systemd_unit="ledger-agent-web.service"
 use_systemd=0
 
@@ -37,7 +38,7 @@ if [[ "$use_systemd" -eq 1 ]] && systemctl --user is-active --quiet "$systemd_un
   if curl --noproxy '*' -fsS "$health_url" >/dev/null; then
     existing_pid="$(systemctl --user show "$systemd_unit" -p MainPID --value)"
     echo "$existing_pid" >"$pid_file"
-    echo "Web UI 已在运行: http://127.0.0.1:8000 (PID $existing_pid)"
+    echo "Web UI 已在运行: ${web_url} (PID $existing_pid)"
     exit 0
   fi
   systemctl --user stop "$systemd_unit"
@@ -46,7 +47,7 @@ fi
 if [[ -f "$pid_file" ]]; then
   existing_pid="$(tr -d '[:space:]' <"$pid_file")"
   if is_project_web_pid "$existing_pid" && curl --noproxy '*' -fsS "$health_url" >/dev/null; then
-    echo "Web UI 已在运行: http://127.0.0.1:8000 (PID $existing_pid)"
+    echo "Web UI 已在运行: ${web_url} (PID $existing_pid)"
     exit 0
   fi
   rm -f "$pid_file"
@@ -59,8 +60,7 @@ if [[ "$use_systemd" -eq 1 ]]; then
     --working-directory="$project_dir" "$project_dir/scripts/run_web_foreground.sh"
   pid="$(systemctl --user show "$systemd_unit" -p MainPID --value)"
 else
-  setsid env PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 "$python_bin" -m uvicorn web_app:app \
-    --app-dir src --host 127.0.0.1 --port 8000 </dev/null >"$log_file" 2>&1 &
+  setsid "$project_dir/scripts/run_web_foreground.sh" </dev/null >"$log_file" 2>&1 &
   pid=$!
 fi
 echo "$pid" >"$pid_file"
@@ -69,7 +69,7 @@ for _ in $(seq 1 50); do
   if curl --noproxy '*' -fsS "$health_url" >/dev/null 2>&1; then
     sleep 0.1
     if is_project_web_pid "$pid" && curl --noproxy '*' -fsS "$health_url" >/dev/null 2>&1; then
-      echo "Web UI 已启动: http://127.0.0.1:8000 (PID $pid)"
+      echo "Web UI 已启动: ${web_url} (PID $pid)"
       echo "日志: $log_file"
       exit 0
     fi

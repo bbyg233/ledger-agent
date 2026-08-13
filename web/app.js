@@ -4,6 +4,7 @@ const state = {
   managementProposals: [],
   editing: null,
   transactions: [],
+  billSort: { key: "date", direction: "desc" },
   activeView: "chat",
   logKind: "operations",
   controller: null,
@@ -20,6 +21,7 @@ const state = {
   capital: null,
   sessionId: "web",
   currentRequestId: "",
+  chatQueue: [],
   draftRequestId: "",
   pendingPollTimer: null,
   progressSource: null,
@@ -40,6 +42,7 @@ const viewMeta = {
   subscriptions: ["订阅", "管理预计的周期扣款，并在实际扣款后写入账本"],
   liabilities: ["待还", "按月管理信用卡、花呗、月付和分期账单"],
   logs: ["日志", "操作记录与 Agent 调用状态"],
+  memory: ["偏好记忆", "管理 Agent 可使用的个人长期规则"],
   settings: ["账本设置", "分类、支付方式与本地备份"],
 };
 
@@ -66,10 +69,21 @@ function escapeHtml(value) {
 }
 
 async function request(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const { retryNetwork = false, ...fetchOptions } = options;
+  let response;
+  for (let attempt = 0; attempt < (retryNetwork ? 2 : 1); attempt += 1) {
+    try {
+      response = await fetch(url, {
+        headers: { "Content-Type": "application/json" },
+        ...fetchOptions,
+      });
+      break;
+    } catch (error) {
+      if (!retryNetwork || attempt > 0 || error.name === "AbortError") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+  }
+  if (!response) throw new Error("无法连接本地服务");
   let data;
   try {
     data = await response.json();
@@ -207,8 +221,14 @@ function addMessage(text, role, isError = false, autoScroll = true, attachments 
     }
     node.appendChild(gallery);
   }
-  $("messages").appendChild(node);
+  const queuedMessage = role === "agent" ? $("messages").querySelector(".message.user.queued") : null;
+  if (queuedMessage) {
+    $("messages").insertBefore(node, queuedMessage);
+  } else {
+    $("messages").appendChild(node);
+  }
   if (autoScroll) scrollMessagesToLatest();
+  return node;
 }
 
 function addPendingMessage(startedAt = Date.now(), requestId = "") {
@@ -245,6 +265,21 @@ function watchChatProgress(requestId, pending) {
 
 function editableValue(value) {
   return value === "未指定" ? "" : (value ?? "");
+}
+
+function statementDayOptions(selected = 0) {
+  const current = Number(selected || 0);
+  const options = [`<option value="">未设置</option>`];
+  for (let day = 1; day <= 31; day += 1) {
+    options.push(`<option value="${day}" ${day === current ? "selected" : ""}>每月 ${day} 日</option>`);
+  }
+  return options.join("");
+}
+
+function initializeStatementDaySelectors() {
+  ["liability-statement-day", "liability-edit-statement-day"].forEach((id) => {
+    $(id).innerHTML = statementDayOptions();
+  });
 }
 
 function resultText(data) {
@@ -288,6 +323,15 @@ function resultText(data) {
     const summary = data.liabilities?.summary;
     return summary ? `${data.liabilities.month} 本月应还 ${money(summary.due_amount)}，本月未还 ${money(summary.remaining_amount)}。` : "待还清单已经读取。";
   }
+  if (action === "reminder") {
+    const reminder = data.reminder;
+    if (!reminder?.enabled) return "每日记账提醒已关闭。";
+    if (reminder.skipped_today) return "今天的记账提醒已跳过，明天会恢复。";
+    return `每日记账提醒已设为 ${reminder.time}。`;
+  }
+  if (action === "memory") {
+    return `已记住：${data.memory?.title || "个人偏好"}。你可以在“偏好记忆”中随时编辑或删除。`;
+  }
   if (action === "report") return data.narrative || (data.report?.recommendations || []).join("\n");
   return "已经处理完成。";
 }
@@ -308,7 +352,9 @@ function agentMessageText(data) {
 
 function setChatBusy(busy) {
   state.busy = busy;
-  $("send").disabled = busy;
+  $("send").disabled = state.transcribingAudio;
+  $("send").title = busy ? "加入等待队列" : "发送";
+  $("send").setAttribute("aria-label", busy ? "加入等待队列" : "发送");
   $("receipt-images").disabled = busy;
   $("attach-images").classList.toggle("disabled", busy);
   $("attach-images").setAttribute("aria-disabled", String(busy));
@@ -327,6 +373,64 @@ function applyAgentResult(data, showMessage = true) {
     state.draftRequestId = data.request_id || "";
     showManagementDrafts(data.proposals || []);
   }
+  if (data.agent_action?.action === "reminder") renderReminderSettings(data.reminder || {});
+  if (data.agent_action?.action === "memory" && state.activeView === "memory") loadPersonalMemories();
+}
+
+function renderPersonalMemories(items) {
+  const list = $("personal-memory-list");
+  $("personal-memory-empty").hidden = items.length > 0;
+  list.innerHTML = items.map((item) => `
+    <article class="personal-memory-item ${item.enabled ? "" : "disabled"}" data-personal-memory-id="${escapeHtml(item.id)}">
+      <div class="personal-memory-item-heading">
+        <div><strong>${escapeHtml(item.title)}</strong><span>${item.source === "agent" ? "由 Agent 按你的明确指令写入" : "手动添加"}</span></div>
+        <label class="toggle-field"><input type="checkbox" data-toggle-personal-memory="${escapeHtml(item.id)}" ${item.enabled ? "checked" : ""}><span>${item.enabled ? "启用" : "停用"}</span></label>
+      </div>
+      <textarea data-personal-memory-content="${escapeHtml(item.id)}" maxlength="500" rows="3" aria-label="${escapeHtml(item.title)} 的规则内容">${escapeHtml(item.content)}</textarea>
+      <div class="personal-memory-actions"><button class="button" type="button" data-save-personal-memory="${escapeHtml(item.id)}">保存修改</button><button class="button danger" type="button" data-delete-personal-memory="${escapeHtml(item.id)}">删除</button></div>
+    </article>`).join("");
+}
+
+async function loadPersonalMemories() {
+  try {
+    const data = await request("/api/personal-memories");
+    renderPersonalMemories(data.items || []);
+  } catch (error) { toast(error.message); }
+}
+
+async function createPersonalMemory(event) {
+  event.preventDefault();
+  try {
+    await request("/api/personal-memories", {
+      method: "POST",
+      body: JSON.stringify({
+        title: $("personal-memory-title").value.trim(),
+        content: $("personal-memory-content").value.trim(),
+      }),
+    });
+    event.target.reset();
+    toast("个人偏好记忆已添加");
+    await loadPersonalMemories();
+  } catch (error) { toast(error.message); }
+}
+
+async function updatePersonalMemory(id, changes) {
+  try {
+    await request(`/api/personal-memories/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify(changes),
+    });
+    toast("个人偏好记忆已更新");
+    await loadPersonalMemories();
+  } catch (error) { toast(error.message); }
+}
+
+async function deletePersonalMemory(id) {
+  if (!window.confirm("删除这条个人偏好记忆？Agent 之后不会再使用它。")) return;
+  try {
+    await request(`/api/personal-memories/${encodeURIComponent(id)}`, { method: "DELETE" });
+    toast("个人偏好记忆已删除");
+    await loadPersonalMemories();
+  } catch (error) { toast(error.message); }
 }
 
 function chatRequestId() {
@@ -357,7 +461,6 @@ async function pollChatRequest(requestId, pending, startedAt) {
       clearInterval(elapsed);
       state.progressSource?.close();
       pending.remove();
-      setChatBusy(false);
       state.currentRequestId = "";
       if (item.status === "awaiting_confirmation" || item.status === "completed") {
         applyAgentResult(item.result || {});
@@ -365,11 +468,14 @@ async function pollChatRequest(requestId, pending, startedAt) {
       } else if (item.status === "error") {
         addMessage(item.error_message || "这次请求处理失败。", "agent", true);
       }
+      setChatBusy(false);
+      processNextQueuedChat();
     } catch (error) {
       clearInterval(elapsed);
       pending.remove();
-      setChatBusy(false);
       addMessage(error.message, "agent", true);
+      setChatBusy(false);
+      processNextQueuedChat();
     }
   }
   state.pendingPollTimer = setTimeout(poll, 500);
@@ -812,7 +918,7 @@ function managementDraftEditor(proposal, index) {
     const batchAmount = Number(proposal.batch_charge_amount || draft.amount || 0);
     const projected = Number(proposal.projected_due_amount ?? (Number(proposal.previous_due_amount || 0) + batchAmount));
     const statementMonthAdjustment = proposal.statement_month_adjusted_from
-      ? `<small>已按还款日从 ${escapeHtml(proposal.statement_month_adjusted_from)} 调整至 ${escapeHtml(draft.statement_month)} 账单</small>`
+      ? `<small>已按出账日从 ${escapeHtml(proposal.statement_month_adjusted_from)} 调整至 ${escapeHtml(draft.statement_month)} 账单</small>`
       : "";
     return `<div class="draft-item" data-management-index="${index}">
       <div class="draft-item-heading"><strong>登记信用消费</strong>${controls}</div>
@@ -856,6 +962,7 @@ function managementDraftEditor(proposal, index) {
         <label>名称<input data-managed-field="name" value="${escapeHtml(draft.name)}"></label>
         <label>平台 / 发卡行<input data-managed-field="provider" value="${escapeHtml(draft.provider || "")}"></label>
         <label>类型<select data-managed-field="kind"><option value="consumer_credit" ${draft.kind === "consumer_credit" ? "selected" : ""}>消费信贷</option><option value="credit_card" ${draft.kind === "credit_card" ? "selected" : ""}>信用卡</option><option value="installment" ${draft.kind === "installment" ? "selected" : ""}>分期</option><option value="other" ${draft.kind === "other" ? "selected" : ""}>其他</option></select></label>
+        <label>每月出账日（可选）<select data-managed-field="statement_day">${statementDayOptions(draft.statement_day)}</select></label>
         <label>账单月份<input data-managed-field="statement_month" type="month" value="${escapeHtml(draft.statement_month || "")}"></label>
         <label>本月应还<input data-managed-field="due_amount" data-managed-number type="number" min="0" step="0.01" value="${escapeHtml(draft.due_amount || "")}"></label>
         <label>还款日（可选）<input data-managed-field="due_date" type="date" value="${escapeHtml(draft.due_date || "")}"></label>
@@ -984,28 +1091,82 @@ async function approveCategoryProposal(index) {
   toast(`已新增并应用分类“${proposal}”`);
 }
 
-async function submitChat(event) {
-  event.preventDefault();
+function takeComposerMessage() {
   const text = $("prompt").value.trim();
   const imageItems = state.selectedImages.map((item) => ({ ...item }));
-  const images = imageItems.map((item) => item.dataUrl);
-  if ((!text && !images.length) || state.busy || state.transcribingAudio) return;
+  if (!text && !imageItems.length) return null;
+  $("prompt").value = "";
+  state.selectedImages = [];
+  $("receipt-images").value = "";
+  renderSelectedImages();
+  return { text, imageItems };
+}
+
+function addQueuedChatMessage(item) {
+  const node = addMessage(
+    item.text || `上传了 ${item.imageItems.length} 张账单截图`,
+    "user",
+    false,
+    true,
+    item.imageItems.map((image) => ({ url: image.dataUrl, name: image.name })),
+  );
+  node.classList.add("queued");
+  const status = document.createElement("small");
+  status.className = "queue-status";
+  status.textContent = "等待中";
+  node.appendChild(status);
+  return node;
+}
+
+function enqueueChatMessage(item) {
+  if (state.chatQueue.length >= 10) {
+    toast("等待队列已满，请等当前消息处理完成");
+    $("prompt").value = item.text;
+    return;
+  }
+  item.node = addQueuedChatMessage(item);
+  state.chatQueue.push(item);
+  toast(`已加入等待队列（${state.chatQueue.length} 条）`);
+}
+
+function processNextQueuedChat() {
+  if (state.busy || state.transcribingAudio || !state.chatQueue.length) return;
+  const item = state.chatQueue.shift();
+  void startChatRequest(item);
+}
+
+async function submitChat(event) {
+  event.preventDefault();
+  if (state.transcribingAudio) return;
+  const item = takeComposerMessage();
+  if (!item) return;
+  if (state.busy) {
+    enqueueChatMessage(item);
+    return;
+  }
+  await startChatRequest(item);
+}
+
+async function startChatRequest(item) {
+  const { text, imageItems } = item;
+  const images = imageItems.map((image) => image.dataUrl);
   const requestId = chatRequestId();
   state.currentRequestId = requestId;
   state.cancelReason = "";
   state.controller = new AbortController();
   setChatBusy(true);
-  $("prompt").value = "";
-  state.selectedImages = [];
-  $("receipt-images").value = "";
-  renderSelectedImages();
-  addMessage(
-    text || `上传了 ${images.length} 张账单截图`,
-    "user",
-    false,
-    true,
-    imageItems.map((item) => ({ url: item.dataUrl, name: item.name })),
-  );
+  if (item.node) {
+    item.node.classList.remove("queued");
+    item.node.querySelector(".queue-status")?.remove();
+  } else {
+    addMessage(
+      text || `上传了 ${images.length} 张账单截图`,
+      "user",
+      false,
+      true,
+      imageItems.map((image) => ({ url: image.dataUrl, name: image.name })),
+    );
+  }
   const pending = addPendingMessage(Date.now(), requestId);
   watchChatProgress(requestId, pending);
   const startedAt = Date.now();
@@ -1022,6 +1183,7 @@ async function submitChat(event) {
       method: "POST",
       body: JSON.stringify({ text, images, session_id: state.sessionId, request_id: requestId }),
       signal: state.controller.signal,
+      retryNetwork: true,
     });
     pending.remove();
     state.progressSource?.close();
@@ -1045,7 +1207,13 @@ async function submitChat(event) {
         state.cancelReason === "timeout",
       );
     } else {
-      addMessage(error.message, "agent", true);
+      addMessage(
+        error.message === "Failed to fetch" || error.message === "无法连接本地服务"
+          ? "无法连接本地服务。请稍后重试；若持续出现，请从桌面入口重新启动 Ledger Agent。"
+          : error.message,
+        "agent",
+        true,
+      );
     }
   } finally {
     clearInterval(elapsed);
@@ -1055,6 +1223,7 @@ async function submitChat(event) {
     if (!handedToPoll) state.currentRequestId = "";
     state.cancelReason = "";
     $("prompt").focus();
+    if (!handedToPoll) processNextQueuedChat();
   }
 }
 
@@ -1403,6 +1572,7 @@ function switchView(view, updateUrl = true) {
   if (view === "subscriptions") loadSubscriptions();
   if (view === "liabilities") loadLiabilities();
   if (view === "logs") loadLogs();
+  if (view === "memory") loadPersonalMemories();
   if (view === "settings") loadSettings();
   if (view === "chat") scrollMessagesToLatest("auto");
 }
@@ -1511,55 +1681,101 @@ async function loadBills() {
   try {
     const data = await request(`/api/financial-records?${params}`);
     state.transactions = data.results;
-    $("bills-empty").hidden = data.results.length > 0;
-    $("bill-rows").innerHTML = data.results.map((tx) => {
-      const isRepayment = tx.record_type === "liability_payment";
-      const isTransfer = tx.record_type === "transfer";
-      const isLiabilityChange = tx.record_type === "liability_statement";
-      const isLiabilityCharge = tx.record_type === "liability_charge";
-      const categoryDetail = isRepayment
-        ? `还款${tx.statement_month ? `<span>归属 ${escapeHtml(tx.statement_month)} 账单</span>` : ""}`
-        : isTransfer
-          ? "账户转账<span>不计入收入或支出</span>"
-        : isLiabilityChange
-          ? `待还变动${tx.statement_month ? `<span>归属 ${escapeHtml(tx.statement_month)} 账单 · 不影响现金</span>` : "<span>不影响现金</span>"}`
-          : isLiabilityCharge
-            ? `信用消费${tx.statement_month ? `<span>归属 ${escapeHtml(tx.statement_month)} 账单 · 不影响现金</span>` : "<span>不影响现金</span>"}`
-        : `${escapeHtml(tx.category)}${tx.needs_category_review && tx.suggested_category ? `<span>建议：${escapeHtml(tx.suggested_category)}</span>` : ""}`;
-      let action;
-      if (isRepayment) {
-        action = `<div class="record-actions">
-          <button class="row-action" type="button" data-edit-payment="${escapeHtml(tx.id)}" title="编辑还款" aria-label="编辑还款">⋯</button>
-          <button class="row-action" type="button" data-open-liability="${escapeHtml(tx.liability_id)}" data-statement-month="${escapeHtml(tx.statement_month)}" title="查看对应待还账单" aria-label="查看对应待还账单">→</button>
-        </div>`;
-      } else if (tx.source === "subscription") {
-        action = `<button class="row-action" type="button" data-reverse-subscription-charge="${tx.id}" title="撤销订阅扣款" aria-label="撤销订阅扣款">↶</button>`;
-      } else if (isTransfer) {
-        action = "";
-      } else if (isLiabilityChange) {
-        action = `<button class="row-action" type="button" data-open-liability="${escapeHtml(tx.liability_id)}" data-statement-month="${escapeHtml(tx.statement_month)}" title="查看对应待还账单" aria-label="查看对应待还账单">→</button>`;
-      } else if (isLiabilityCharge) {
-        action = `<button class="row-action" type="button" data-open-liability="${escapeHtml(tx.liability_id)}" data-statement-month="${escapeHtml(tx.statement_month)}" title="查看对应待还账单" aria-label="查看对应待还账单">→</button>`;
-      } else {
-        action = `<button class="row-action" type="button" data-edit-id="${tx.id}" title="编辑" aria-label="编辑">⋯</button>`;
-      }
-      const subject = isTransfer
-        ? tx.account
-        : (tx.merchant || tx.note || "未填写");
-      const account = isTransfer ? "内部转账" : tx.account;
-      return `
-      <tr>
-        <td>${escapeHtml(tx.date)}</td>
-        <td title="${escapeHtml(subject)}">${escapeHtml(subject)}</td>
-        <td class="category-cell">${categoryDetail}</td>
-        <td title="${escapeHtml(account)}">${escapeHtml(account)}</td>
-        <td class="amount ${escapeHtml(tx.direction)}">${isLiabilityChange ? "负债 " : (isTransfer ? "↔" : (tx.direction === "income" ? "+" : "-"))}${money(tx.amount)}</td>
-        <td>${action}</td>
-      </tr>`;
-    }).join("");
+    renderBills();
   } catch (error) {
     toast(error.message);
   }
+}
+
+function billCategoryLabel(tx) {
+  if (tx.record_type === "liability_payment") return "还款";
+  if (tx.record_type === "transfer") return "账户转账";
+  if (tx.record_type === "liability_statement") return "待还变动";
+  if (tx.record_type === "liability_charge") return "信用消费";
+  return tx.category || "待分类";
+}
+
+function billSortValue(tx, key) {
+  if (key === "date") return String(tx.date || "");
+  if (key === "subject") return tx.record_type === "transfer"
+    ? String(tx.account || "")
+    : String(tx.merchant || tx.note || "未填写");
+  if (key === "category") return billCategoryLabel(tx);
+  if (key === "account") return tx.record_type === "transfer" ? "内部转账" : String(tx.account || "未指定");
+  return Number(tx.amount || 0);
+}
+
+function sortedBills() {
+  const { key, direction } = state.billSort;
+  const multiplier = direction === "asc" ? 1 : -1;
+  return [...state.transactions].sort((left, right) => {
+    const first = billSortValue(left, key);
+    const second = billSortValue(right, key);
+    const result = key === "amount"
+      ? first - second
+      : String(first).localeCompare(String(second), "zh-CN", { numeric: true });
+    if (result) return result * multiplier;
+    return Number(right.id || 0) - Number(left.id || 0);
+  });
+}
+
+function renderBillSortIndicators() {
+  document.querySelectorAll("[data-bill-sort]").forEach((button) => {
+    const active = button.dataset.billSort === state.billSort.key;
+    button.closest("th").setAttribute("aria-sort", active
+      ? (state.billSort.direction === "asc" ? "ascending" : "descending")
+      : "none");
+    button.querySelector(".sort-indicator").textContent = active
+      ? (state.billSort.direction === "asc" ? "↑" : "↓")
+      : "↕";
+  });
+}
+
+function renderBills() {
+  const records = sortedBills();
+  $("bills-empty").hidden = records.length > 0;
+  renderBillSortIndicators();
+  $("bill-rows").innerHTML = records.map((tx) => {
+    const isRepayment = tx.record_type === "liability_payment";
+    const isTransfer = tx.record_type === "transfer";
+    const isLiabilityChange = tx.record_type === "liability_statement";
+    const isLiabilityCharge = tx.record_type === "liability_charge";
+    const categoryDetail = isRepayment
+      ? `还款${tx.statement_month ? `<span>归属 ${escapeHtml(tx.statement_month)} 账单</span>` : ""}`
+      : isTransfer
+        ? "账户转账<span>不计入收入或支出</span>"
+      : isLiabilityChange
+        ? `待还变动${tx.statement_month ? `<span>归属 ${escapeHtml(tx.statement_month)} 账单 · 不影响现金</span>` : "<span>不影响现金</span>"}`
+        : isLiabilityCharge
+          ? `信用消费${tx.statement_month ? `<span>归属 ${escapeHtml(tx.statement_month)} 账单 · 不影响现金</span>` : "<span>不影响现金</span>"}`
+          : `${escapeHtml(tx.category)}${tx.needs_category_review && tx.suggested_category ? `<span>建议：${escapeHtml(tx.suggested_category)}</span>` : ""}`;
+    let action;
+    if (isRepayment) {
+      action = `<div class="record-actions">
+        <button class="row-action" type="button" data-edit-payment="${escapeHtml(tx.id)}" title="编辑还款" aria-label="编辑还款">⋯</button>
+        <button class="row-action" type="button" data-open-liability="${escapeHtml(tx.liability_id)}" data-statement-month="${escapeHtml(tx.statement_month)}" title="查看对应待还账单" aria-label="查看对应待还账单">→</button>
+      </div>`;
+    } else if (tx.source === "subscription") {
+      action = `<button class="row-action" type="button" data-reverse-subscription-charge="${tx.id}" title="撤销订阅扣款" aria-label="撤销订阅扣款">↶</button>`;
+    } else if (isTransfer) {
+      action = "";
+    } else if (isLiabilityChange || isLiabilityCharge) {
+      action = `<button class="row-action" type="button" data-open-liability="${escapeHtml(tx.liability_id)}" data-statement-month="${escapeHtml(tx.statement_month)}" title="查看对应待还账单" aria-label="查看对应待还账单">→</button>`;
+    } else {
+      action = `<button class="row-action" type="button" data-edit-id="${tx.id}" title="编辑" aria-label="编辑">⋯</button>`;
+    }
+    const subject = isTransfer ? tx.account : (tx.merchant || tx.note || "未填写");
+    const account = isTransfer ? "内部转账" : tx.account;
+    return `
+    <tr>
+      <td>${escapeHtml(tx.date)}</td>
+      <td title="${escapeHtml(subject)}">${escapeHtml(subject)}</td>
+      <td class="category-cell">${categoryDetail}</td>
+      <td title="${escapeHtml(account)}">${escapeHtml(account)}</td>
+      <td class="amount ${escapeHtml(tx.direction)}">${isLiabilityChange ? "负债 " : (isTransfer ? "↔" : (tx.direction === "income" ? "+" : "-"))}${money(tx.amount)}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join("");
 }
 
 function openEditor(id) {
@@ -1891,6 +2107,7 @@ async function saveLiability(event) {
     name: $("liability-name").value.trim(),
     provider: $("liability-provider").value.trim(),
     kind: $("liability-kind").value,
+    statement_day: Number($("liability-statement-day").value || 0),
     statement_month: $("liability-statement-month").value,
     due_amount: Number($("liability-due-amount").value),
     due_date: $("liability-due-date").value,
@@ -1908,6 +2125,7 @@ async function saveLiability(event) {
     $("liability-existing").value = "";
     $("liability-due-amount").value = "";
     $("liability-minimum").value = "";
+    $("liability-statement-day").value = "";
     $("liability-due-date").value = "";
     $("liability-statement-month").value = $("month").value;
     $("liability-submit").textContent = "新增账户并保存账单";
@@ -1926,6 +2144,7 @@ function selectLiabilityAccount() {
     $("liability-name").value = "";
     $("liability-provider").value = "";
     $("liability-kind").value = "consumer_credit";
+    $("liability-statement-day").value = "";
     $("liability-statement-month").value = $("month").value;
     $("liability-due-amount").value = "";
     $("liability-due-date").value = "";
@@ -1939,6 +2158,7 @@ function selectLiabilityAccount() {
   $("liability-name").value = account.name;
   $("liability-provider").value = account.provider || "";
   $("liability-kind").value = account.kind;
+  $("liability-statement-day").value = account.statement_day || "";
   $("liability-statement-month").value = $("month").value;
   $("liability-account").value = editableValue(account.repayment_account);
   $("liability-limit").value = account.credit_limit ?? "";
@@ -1993,6 +2213,7 @@ function openLiabilityEditor(id, statementMonth = "") {
   $("liability-edit-name").value = item.name;
   $("liability-edit-provider").value = item.provider || "";
   $("liability-edit-kind").value = item.kind;
+  $("liability-edit-statement-day").value = item.statement_day || "";
   $("liability-edit-statement-month").value = item.statement_month;
   $("liability-edit-due-amount").value = item.due_amount;
   $("liability-edit-due-date").value = item.due_date;
@@ -2012,6 +2233,7 @@ async function saveLiabilityEdit(event) {
     name: $("liability-edit-name").value.trim(),
     provider: $("liability-edit-provider").value.trim(),
     kind: $("liability-edit-kind").value,
+    statement_day: Number($("liability-edit-statement-day").value || 0),
     statement_month: $("liability-edit-statement-month").value,
     source_statement_month: $("liability-edit-source-statement-month").value,
     due_amount: Number($("liability-edit-due-amount").value),
@@ -2221,9 +2443,78 @@ async function loadClassificationStatus() {
   $("classify-pending").disabled = count === 0;
 }
 
+function renderReminderSettings(data) {
+  $("reminder-enabled").checked = Boolean(data.enabled);
+  $("reminder-time").value = data.time || "22:00";
+  const skipButton = $("skip-reminder-today");
+  if (!data.enabled) {
+    $("reminder-status").textContent = "每日提醒已关闭";
+  } else if (data.skipped_today) {
+    $("reminder-status").textContent = "今天已跳过，明天会按设定时间恢复提醒";
+  } else if (data.sent_today) {
+    $("reminder-status").textContent = "今天已提醒，明天会按设定时间再次提醒";
+  } else {
+    $("reminder-status").textContent = `今天将在 ${data.time} 提醒记账`;
+  }
+  skipButton.textContent = data.skipped_today ? "恢复今日提醒" : "今天不提醒";
+  skipButton.disabled = !data.enabled || data.sent_today;
+}
+
+async function loadReminderSettings() {
+  renderReminderSettings(await request("/api/settings/reminder"));
+}
+
+async function openReminderSettings() {
+  try {
+    await loadReminderSettings();
+    $("reminder-dialog").showModal();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function saveReminderSettings(event) {
+  event.preventDefault();
+  const button = $("save-reminder");
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    const data = await request("/api/settings/reminder", {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: $("reminder-enabled").checked,
+        time: $("reminder-time").value,
+      }),
+    });
+    renderReminderSettings(data);
+    toast("每日提醒已保存");
+    $("reminder-dialog").close();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function toggleReminderToday() {
+  const skip = $("skip-reminder-today").textContent === "今天不提醒";
+  try {
+    const data = await request("/api/settings/reminder/today", {
+      method: "PUT",
+      body: JSON.stringify({ skip }),
+    });
+    renderReminderSettings(data);
+    toast(skip ? "今天不会再弹出记账提醒" : "今天的记账提醒已恢复");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function loadSettings() {
   try {
-    await Promise.all([loadReferences(), loadBackups(), loadClassificationStatus()]);
+    await Promise.all([loadReferences(), loadBackups(), loadClassificationStatus(), loadReminderSettings()]);
   } catch (error) { toast(error.message); }
 }
 
@@ -2445,6 +2736,7 @@ $("cancel-request").addEventListener("click", () => {
   state.currentRequestId = "";
   setChatBusy(false);
   addMessage("已停止等待；刷新页面可以恢复后台进度。", "agent");
+  processNextQueuedChat();
 });
 $("confirm-draft").addEventListener("click", confirmDrafts);
 $("draft-list").addEventListener("click", (event) => {
@@ -2488,6 +2780,18 @@ $("cancel-draft").addEventListener("click", async () => {
 });
 $("bill-search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadBills, 250); });
 $("bill-direction").addEventListener("change", loadBills);
+document.querySelector(".financial-table thead").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-bill-sort]");
+  if (!button) return;
+  const key = button.dataset.billSort;
+  state.billSort = {
+    key,
+    direction: state.billSort.key === key
+      ? (state.billSort.direction === "asc" ? "desc" : "asc")
+      : (key === "date" || key === "amount" ? "desc" : "asc"),
+  };
+  renderBills();
+});
 $("bill-rows").addEventListener("click", (event) => {
   const button = event.target.closest("[data-edit-id]");
   const payment = event.target.closest("[data-edit-payment]");
@@ -2524,6 +2828,26 @@ $("close-merge").addEventListener("click", () => $("merge-dialog").close());
 $("cancel-merge").addEventListener("click", () => $("merge-dialog").close());
 $("create-backup").addEventListener("click", createLedgerBackup);
 $("classify-pending").addEventListener("click", classifyPendingTransactions);
+$("personal-memory-form").addEventListener("submit", createPersonalMemory);
+$("personal-memory-list").addEventListener("click", (event) => {
+  const save = event.target.closest("[data-save-personal-memory]");
+  const remove = event.target.closest("[data-delete-personal-memory]");
+  if (save) {
+    const item = save.closest("[data-personal-memory-id]");
+    void updatePersonalMemory(save.dataset.savePersonalMemory, {
+      content: item.querySelector("[data-personal-memory-content]").value.trim(),
+    });
+  }
+  if (remove) void deletePersonalMemory(remove.dataset.deletePersonalMemory);
+});
+$("personal-memory-list").addEventListener("change", (event) => {
+  const toggle = event.target.closest("[data-toggle-personal-memory]");
+  if (toggle) void updatePersonalMemory(toggle.dataset.togglePersonalMemory, { enabled: toggle.checked });
+});
+$("open-reminder-settings").addEventListener("click", openReminderSettings);
+$("close-reminder").addEventListener("click", () => $("reminder-dialog").close());
+$("reminder-form").addEventListener("submit", saveReminderSettings);
+$("skip-reminder-today").addEventListener("click", toggleReminderToday);
 $("view-settings").addEventListener("click", (event) => {
   const favorite = event.target.closest("[data-favorite-reference]");
   const edit = event.target.closest("[data-edit-reference]");
@@ -2544,6 +2868,7 @@ $("month").addEventListener("change", async () => {
 });
 
 $("month").value = new Date().toISOString().slice(0, 7);
+initializeStatementDaySelectors();
 $("liability-statement-month").value = $("month").value;
 $("subscription-next-date").value = new Date().toISOString().slice(0, 10);
 $("liability-due-date").value = "";
@@ -2557,6 +2882,7 @@ loadDashboard();
 loadAccounts();
 loadLiabilityAccounts();
 loadReferences().catch((error) => toast(error.message));
+loadReminderSettings().catch((error) => toast(error.message));
 const startupParams = new URLSearchParams(window.location.search);
 switchView(startupParams.get("view") || "chat", false);
 if (startupParams.get("reminder") === "daily") {

@@ -942,6 +942,43 @@ def test_web_model_setting_rejects_unknown_provider(tmp_path, monkeypatch):
     assert response.status_code == 400
 
 
+def test_web_daily_reminder_settings_and_today_skip(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
+    monkeypatch.setattr("web_app.schedule_windows_reminder_sync", lambda *_args, **_kwargs: False)
+
+    initial = client.get("/api/settings/reminder")
+    changed = client.put(
+        "/api/settings/reminder",
+        json={"enabled": True, "time": "21:30"},
+    )
+    skipped = client.put("/api/settings/reminder/today", json={"skip": True})
+    restored = client.put("/api/settings/reminder/today", json={"skip": False})
+
+    assert initial.status_code == 200
+    assert initial.json()["time"] == "22:00"
+    assert changed.json()["time"] == "21:30"
+    assert skipped.json()["skipped_today"] is True
+    assert restored.json()["skipped_today"] is False
+
+
+def test_web_personal_memory_crud(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
+
+    created = client.post(
+        "/api/personal-memories",
+        json={"title": "默认账户", "content": "优先微信"},
+    )
+    memory_id = created.json()["memory"]["id"]
+    disabled = client.patch(f"/api/personal-memories/{memory_id}", json={"enabled": False})
+    listed = client.get("/api/personal-memories")
+    deleted = client.delete(f"/api/personal-memories/{memory_id}")
+
+    assert created.status_code == 200
+    assert disabled.json()["memory"]["enabled"] is False
+    assert listed.json()["items"][0]["content"] == "优先微信"
+    assert deleted.json()["deleted"] is True
+
+
 def test_web_agent_error_is_logged_without_full_input(tmp_path, monkeypatch):
     monkeypatch.setenv("LEDGER_AGENT_DB", str(tmp_path / "web.db"))
     monkeypatch.setenv("ARK_API_KEY", "secret-test-key")

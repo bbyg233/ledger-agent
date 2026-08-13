@@ -25,25 +25,37 @@ if ([string]::IsNullOrWhiteSpace($projectPath)) {
 if ([string]::IsNullOrWhiteSpace($webUrl)) {
     $webUrl = "http://127.0.0.1:8000"
 }
+$webPort = ([Uri]$webUrl).Port
+if ($webPort -lt 1) {
+    throw "The launcher configuration contains an invalid webUrl: $webUrl"
+}
 
 $logPath = Join-Path $PSScriptRoot "launcher.log"
 $wsl = Join-Path $env:SystemRoot "System32\wsl.exe"
 $startScript = "$projectPath/scripts/start_web.sh"
-$wslArgs = @()
-if (-not [string]::IsNullOrWhiteSpace($distro)) {
-    $wslArgs += @("-d", $distro)
-}
-$wslArgs += @(
-    "--exec",
-    "bash",
-    $startScript
-)
 
 try {
-    $output = & $wsl @wslArgs 2>&1
-    $output | Set-Content -Path $logPath -Encoding UTF8
-    if ($LASTEXITCODE -ne 0) {
-        throw "WSL startup failed with exit code $LASTEXITCODE."
+    # Pass every native WSL argument explicitly. Splatted argument arrays can
+    # split the Linux project path when it contains spaces.
+    # Native-command stderr must remain non-terminating so it can be saved to
+    # launcher.log instead of being reduced to a malformed PowerShell message.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        if ([string]::IsNullOrWhiteSpace($distro)) {
+            $output = & $wsl "--exec" "env" "LEDGER_AGENT_PORT=$webPort" "bash" $startScript 2>&1
+        } else {
+            $output = & $wsl "-d" $distro "--exec" "env" "LEDGER_AGENT_PORT=$webPort" "bash" $startScript 2>&1
+        }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $outputText = (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim()
+    $outputText | Set-Content -Path $logPath -Encoding UTF8
+    if ($exitCode -ne 0) {
+        $detail = if ($outputText) { "`n`n$outputText" } else { "" }
+        throw "WSL startup failed with exit code $exitCode.$detail"
     }
     if (-not $NoBrowser) {
         Start-Process $webUrl

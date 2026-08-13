@@ -190,7 +190,7 @@ def process_chat_request(
                     error_result = {
                         "kind": "error",
                         "request_id": request_id,
-                        "message": fa.redact_sensitive_text(str(exc))[:300],
+                        "message": fa.present_model_error(exc, provider=provider),
                     }
                     fa.add_message(
                         conn,

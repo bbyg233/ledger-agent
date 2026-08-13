@@ -130,14 +130,18 @@ def _account_flows_after_baseline(
     start = str(baseline["reconciled_on"])
     created_at = str(baseline["created_at"])
     condition = "(event_date > ? OR (event_date = ? AND created_at >= ?)) AND event_date <= ?"
+    # Keep an omitted payment account visible in the total asset picture without
+    # pretending it belongs to WeChat, Alipay, or any other real account.
+    transaction_accounts = (account_name, "未指定") if account_name == "待分配余额" else (account_name,)
+    account_placeholders = ", ".join("?" for _ in transaction_accounts)
     transaction = conn.execute(
         f"""
         SELECT COALESCE(SUM(CASE direction WHEN 'income' THEN amount ELSE -amount END), 0)
         FROM (SELECT date AS event_date, created_at, direction, amount FROM transactions
-              WHERE deleted_at IS NULL AND account = ?)
+              WHERE deleted_at IS NULL AND account IN ({account_placeholders}))
         WHERE {condition}
         """,
-        (account_name, start, start, created_at, as_of),
+        (*transaction_accounts, start, start, created_at, as_of),
     ).fetchone()[0]
     repayments = conn.execute(
         f"""
@@ -371,4 +375,3 @@ def reconcile_account(
     core.audit(conn, "account.reconcile", result, source=actor)
     conn.commit()
     return result
-

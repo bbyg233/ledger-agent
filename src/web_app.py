@@ -37,6 +37,7 @@ from financial_agent import (
     init_db,
     chat_history,
     get_chat_request,
+    get_preferences,
     list_agent_runs,
     list_accounts,
     list_backups,
@@ -50,6 +51,7 @@ from financial_agent import (
     llm_uses_responses_api,
     llm_provider,
     llm_provider_catalog,
+    present_model_error,
     merge_reference_value,
     preview_last_transaction_action,
     redact_sensitive_text,
@@ -59,6 +61,7 @@ from financial_agent import (
     restore_backup,
     search_transactions,
     set_llm_selection,
+    set_preference,
     soft_delete_transaction,
     summarize,
     undo_last_transaction_action,
@@ -93,6 +96,20 @@ from financial_agent import (
     update_subscription,
 )
 from services.chat import chat_request_can_resume, process_chat_request
+from services.reminder import (
+    REMINDER_PREFERENCE_KEY,
+    reminder_view,
+    set_reminder_skip_for_today,
+    update_reminder_settings,
+)
+from services.reminder_scheduler import schedule_windows_reminder_sync
+from services.personal_memory import (
+    PERSONAL_MEMORY_PREFERENCE_KEY,
+    create_personal_memory,
+    delete_personal_memory,
+    list_personal_memories,
+    update_personal_memory,
+)
 from services.transcription import transcription_status, transcribe_audio
 
 
@@ -154,6 +171,8 @@ class LiabilityPayload(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     provider: str = Field(default="", max_length=80)
     kind: str = Field(default="other", max_length=30)
+    statement_day: int = Field(default=0, ge=0, le=31)
+    statement_month_offset: int = Field(default=1, ge=0, le=1)
     statement_month: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}$")
     due_amount: float = Field(default=0, ge=0)
     due_date: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
@@ -168,6 +187,8 @@ class LiabilityChanges(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     provider: str | None = Field(default=None, max_length=80)
     kind: str | None = Field(default=None, max_length=30)
+    statement_day: int | None = Field(default=None, ge=0, le=31)
+    statement_month_offset: int | None = Field(default=None, ge=0, le=1)
     statement_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
     source_statement_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
     due_amount: float | None = Field(default=None, ge=0)
@@ -344,6 +365,26 @@ class ModelPayload(BaseModel):
     model: str = Field(min_length=1, max_length=128)
 
 
+class ReminderSettingsPayload(BaseModel):
+    enabled: bool | None = None
+    time: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+class ReminderTodayPayload(BaseModel):
+    skip: bool
+
+
+class PersonalMemoryPayload(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
+    content: str = Field(min_length=1, max_length=500)
+
+
+class PersonalMemoryChanges(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=60)
+    content: str | None = Field(default=None, min_length=1, max_length=500)
+    enabled: bool | None = None
+
+
 @contextmanager
 def database() -> Iterator[Any]:
     conn = connect()
@@ -417,6 +458,117 @@ def change_model(payload: ModelPayload) -> dict[str, str]:
             conn.commit()
         return selection
     except (OSError, ValueError) as exc:
+        raise api_error(exc) from exc
+
+
+def current_reminder_settings(conn: Any) -> dict[str, Any]:
+    return get_preferences(conn).get(REMINDER_PREFERENCE_KEY, {})
+
+
+@app.get("/api/settings/reminder")
+def get_reminder_settings() -> dict[str, Any]:
+    with database() as conn:
+        return reminder_view(current_reminder_settings(conn))
+
+
+@app.put("/api/settings/reminder")
+def change_reminder_settings(payload: ReminderSettingsPayload) -> dict[str, Any]:
+    try:
+        with database() as conn:
+            settings = update_reminder_settings(
+                current_reminder_settings(conn),
+                enabled=payload.enabled,
+                reminder_time=payload.time,
+            )
+            set_preference(conn, REMINDER_PREFERENCE_KEY, settings)
+            result = reminder_view(settings)
+            audit(conn, "settings.reminder.change", result, source="web")
+            conn.commit()
+            result["scheduler_sync_scheduled"] = schedule_windows_reminder_sync(
+                result["time"], enabled=result["enabled"]
+            )
+            return result
+    except ValueError as exc:
+        raise api_error(exc) from exc
+
+
+@app.put("/api/settings/reminder/today")
+def change_reminder_today(payload: ReminderTodayPayload) -> dict[str, Any]:
+    with database() as conn:
+        settings = set_reminder_skip_for_today(
+            current_reminder_settings(conn), skip=payload.skip
+        )
+        set_preference(conn, REMINDER_PREFERENCE_KEY, settings)
+        result = reminder_view(settings)
+        audit(conn, "settings.reminder.today", result, source="web")
+        conn.commit()
+        return result
+
+
+def current_personal_memories(conn: Any) -> list[dict[str, Any]]:
+    return get_preferences(conn).get(PERSONAL_MEMORY_PREFERENCE_KEY, [])
+
+
+@app.get("/api/personal-memories")
+def get_personal_memories() -> dict[str, Any]:
+    with database() as conn:
+        return {"items": list_personal_memories(current_personal_memories(conn))}
+
+
+@app.post("/api/personal-memories")
+def add_personal_memory(payload: PersonalMemoryPayload) -> dict[str, Any]:
+    try:
+        with database() as conn:
+            memories, memory = create_personal_memory(
+                current_personal_memories(conn), title=payload.title, content=payload.content
+            )
+            set_preference(conn, PERSONAL_MEMORY_PREFERENCE_KEY, memories)
+            audit(
+                conn,
+                "settings.personal_memory.create",
+                {"id": memory["id"], "title": memory["title"]},
+                source="web",
+            )
+            conn.commit()
+            return {"memory": memory}
+    except ValueError as exc:
+        raise api_error(exc) from exc
+
+
+@app.patch("/api/personal-memories/{memory_id}")
+def change_personal_memory(memory_id: str, payload: PersonalMemoryChanges) -> dict[str, Any]:
+    try:
+        with database() as conn:
+            memories, memory = update_personal_memory(
+                current_personal_memories(conn),
+                memory_id,
+                title=payload.title,
+                content=payload.content,
+                enabled=payload.enabled,
+            )
+            set_preference(conn, PERSONAL_MEMORY_PREFERENCE_KEY, memories)
+            audit(
+                conn,
+                "settings.personal_memory.update",
+                {"id": memory["id"], "title": memory["title"], "enabled": memory["enabled"]},
+                source="web",
+            )
+            conn.commit()
+            return {"memory": memory}
+    except ValueError as exc:
+        raise api_error(exc) from exc
+
+
+@app.delete("/api/personal-memories/{memory_id}")
+def remove_personal_memory(memory_id: str) -> dict[str, Any]:
+    try:
+        with database() as conn:
+            memories = delete_personal_memory(current_personal_memories(conn), memory_id)
+            set_preference(conn, PERSONAL_MEMORY_PREFERENCE_KEY, memories)
+            audit(conn, "settings.personal_memory.delete", {"id": memory_id}, source="web")
+            conn.commit()
+            return {"deleted": True, "id": memory_id}
+    except ValueError as exc:
         raise api_error(exc) from exc
 
 
@@ -528,7 +680,7 @@ def chat(request: ChatRequest) -> dict[str, Any]:
     except Exception as exc:
         if isinstance(exc, (RuntimeError, ValueError, TypeError)):
             raise api_error(exc) from exc
-        detail = redact_sensitive_text(str(exc))[:200]
+        detail = present_model_error(exc)
         raise HTTPException(status_code=502, detail=f"模型请求失败: {detail}") from exc
 
 
@@ -536,7 +688,7 @@ def chat(request: ChatRequest) -> dict[str, Any]:
 def chat_with_images(request: ImageChatRequest) -> dict[str, Any]:
     try:
         if not llm_uses_responses_api(llm_model()):
-            raise ValueError("当前模型未标记为图片模型，请切换到 doubao-seed-2-0-lite-260428")
+            raise ValueError("当前模型不支持图片输入，请在模型设置中选择支持图片的火山方舟模型")
         return process_chat_request(
             request_id=request.request_id,
             session_id=request.session_id,
@@ -658,7 +810,7 @@ def resume_chat_request(request_id: str) -> dict[str, Any]:
     except Exception as exc:
         if isinstance(exc, (RuntimeError, ValueError, TypeError)):
             raise api_error(exc) from exc
-        detail = redact_sensitive_text(str(exc))[:200]
+        detail = present_model_error(exc)
         raise HTTPException(status_code=502, detail=f"模型请求失败: {detail}") from exc
 
 
