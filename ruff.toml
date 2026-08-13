@@ -1,0 +1,6 @@
+target-version = "py311"
+
+[lint]
+# Keep CI focused on correctness. Style rules can be introduced deliberately,
+# rather than changing unexpectedly when a newer Ruff release changes defaults.
+select = ["E4", "E7", "E9", "F"]
